@@ -108,6 +108,35 @@ describe("buildAgentUpdatePatch", () => {
     expect(patch.adapterConfig).toBeUndefined();
   });
 
+  it("writes max-turn continuation policy under runtimeConfig.heartbeat", () => {
+    const patch = buildAgentUpdatePatch(
+      makeAgent(),
+      makeOverlay({
+        heartbeat: {
+          maxTurnContinuation: {
+            enabled: true,
+            maxAttempts: 3,
+            delayMs: 1000,
+          },
+        },
+      }),
+    );
+
+    expect(patch).toEqual({
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          intervalSec: 300,
+          maxTurnContinuation: {
+            enabled: true,
+            maxAttempts: 3,
+            delayMs: 1000,
+          },
+        },
+      },
+    });
+  });
+
   it("merges cheap profile changes onto existing runtimeConfig.modelProfiles state", () => {
     const agent = makeAgent();
     agent.runtimeConfig = {
@@ -189,6 +218,30 @@ describe("buildAgentUpdatePatch", () => {
         dangerouslyBypassApprovalsAndSandbox: true,
       },
       replaceAdapterConfig: true,
+    });
+  });
+
+  it("preserves paperclip skill-sync selections when changing adapter types", () => {
+    // Desired skills are adapter-agnostic (company-level selections) but are
+    // persisted inside the per-adapter config under `paperclipSkillSync`. A
+    // patch that switches adapters must carry them over instead of wiping the
+    // agent's skills.
+    const agent = makeAgent();
+    agent.adapterConfig = {
+      ...agent.adapterConfig,
+      paperclipSkillSync: { desiredSkills: ["research", "code-review"] },
+    };
+
+    const patch = buildAgentUpdatePatch(
+      agent,
+      makeOverlay({
+        adapterType: "codex_local",
+        adapterConfig: { model: "gpt-5.4" },
+      }),
+    );
+
+    expect((patch.adapterConfig as Record<string, unknown>).paperclipSkillSync).toEqual({
+      desiredSkills: ["research", "code-review"],
     });
   });
 });

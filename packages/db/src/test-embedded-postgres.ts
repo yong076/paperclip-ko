@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -48,6 +49,7 @@ function getReservedTestPorts(): Set<number> {
 
 async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
   const mod = await import("embedded-postgres");
+  await prepareEmbeddedPostgresNativeRuntime();
   return mod.default as EmbeddedPostgresCtor;
 }
 
@@ -104,6 +106,61 @@ function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
   fs.rmSync(dataDir, { recursive: true, force: true });
 }
 
+// Upper bound (ms) on how long we wait for the embedded Postgres cluster to
+// stop gracefully before abandoning the wait and returning from the hook.
+const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 5000;
+
+// `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no
+// shutdown-mode argument. Internally it SIGINTs the postgres process (already
+// PostgreSQL "fast shutdown") and resolves *only* on the child's `exit` event,
+// with no time bound of its own. Under the loaded serial server shard a slow
+// shutdown checkpoint can push that past vitest's hookTimeout and hang the
+// afterAll hook. So we bound the graceful stop: if it overruns, we stop waiting
+// and return so the hook completes. The SIGINT has already been delivered, so
+// the abandoned process still exits on its own (and again when the runner exits).
+// Errors are swallowed, matching prior behavior.
+//
+// `cleanupFn` (data-dir reclaim) is chained on the raw `stop()` promise, not on
+// the timeout race, so the disposable data dir is removed *only after* `stop()`
+// actually settles — i.e. once the child Postgres process has exited. Removing
+// it on the timeout path would pull the data files out from under a still-running
+// cluster and provoke checkpoint / WAL I/O errors. In the fast path `cleanupFn`
+// has run by the time this resolves; in the timeout path it runs asynchronously
+// once the abandoned process finally exits.
+async function stopEmbeddedPostgresBounded(
+  instance: EmbeddedPostgresInstance | null,
+  cleanupFn?: () => void,
+): Promise<void> {
+  if (!instance) {
+    cleanupFn?.();
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stopped = instance
+    .stop()
+    .catch(() => {
+      // Swallow shutdown errors — the data dir is reclaimed regardless.
+    })
+    .finally(() => {
+      try {
+        cleanupFn?.();
+      } catch {
+        // Best-effort reclaim; ignore removal errors.
+      }
+    });
+  try {
+    await Promise.race([
+      stopped,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function formatEmbeddedPostgresError(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
   if (typeof error === "string" && error.length > 0) return error;
@@ -111,11 +168,15 @@ function formatEmbeddedPostgresError(error: unknown): string {
 }
 
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
-  const { dataDir, instance } = await createEmbeddedPostgresTestInstance(
-    "paperclip-embedded-postgres-probe-",
-  );
+  let dataDir: string | null = null;
+  let instance: EmbeddedPostgresInstance | null = null;
 
   try {
+    const created = await createEmbeddedPostgresTestInstance(
+      "paperclip-embedded-postgres-probe-",
+    );
+    dataDir = created.dataDir;
+    instance = created.instance;
     await instance.initialise();
     await instance.start();
     return { supported: true };
@@ -125,8 +186,9 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
       reason: formatEmbeddedPostgresError(error),
     };
   } finally {
-    await instance.stop().catch(() => {});
-    cleanupEmbeddedPostgresTestDirs(dataDir);
+    await stopEmbeddedPostgresBounded(instance, () => {
+      if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    });
   }
 }
 
@@ -140,9 +202,14 @@ export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgres
 export async function startEmbeddedPostgresTestDatabase(
   tempDirPrefix: string,
 ): Promise<EmbeddedPostgresTestDatabase> {
-  const { dataDir, port, instance } = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+  let dataDir: string | null = null;
+  let instance: EmbeddedPostgresInstance | null = null;
 
   try {
+    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+    dataDir = created.dataDir;
+    instance = created.instance;
+    const { port } = created;
     await instance.initialise();
     await instance.start();
 
@@ -154,13 +221,15 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
-        await instance.stop().catch(() => {});
-        cleanupEmbeddedPostgresTestDirs(dataDir);
+        await stopEmbeddedPostgresBounded(instance, () => {
+          if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+        });
       },
     };
   } catch (error) {
-    await instance.stop().catch(() => {});
-    cleanupEmbeddedPostgresTestDirs(dataDir);
+    await stopEmbeddedPostgresBounded(instance, () => {
+      if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    });
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
     );

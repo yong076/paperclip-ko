@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -6,11 +9,18 @@ import {
   agentWakeupRequests,
   agents,
   companies,
+  companyMemberships,
   costEvents,
   createDb,
+  executionWorkspaces,
+  heartbeatRunEvents,
   heartbeatRuns,
+  issueComments,
   issueRelations,
   issues,
+  pluginManagedResources,
+  plugins,
+  projects,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -45,19 +55,52 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("plugin orchestration APIs", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  const tempRoots: string[] = [];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-plugin-orchestration-");
     db = createDb(tempDb.connectionString);
   }, 20_000);
 
+  function isHeartbeatRunDependentFkError(error: unknown) {
+    const message = error instanceof Error ? `${error.message} ${String(error.cause ?? "")}` : String(error);
+    return (
+      message.includes("heartbeat_run_events_run_id_heartbeat_runs_id_fk")
+      || message.includes("activity_log_run_id_heartbeat_runs_id_fk")
+    );
+  }
+
+  // A real (fire-and-forget) heartbeat run may still be executing in the
+  // background when a test's own createComment-triggered wakeup completes —
+  // retry deletion so that race doesn't fail cleanup with an FK violation.
+  async function deleteHeartbeatRunsWithDependents() {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await db.delete(heartbeatRunEvents);
+      await db.delete(activityLog);
+      try {
+        await db.delete(heartbeatRuns);
+        return;
+      } catch (error) {
+        if (!isHeartbeatRunDependentFkError(error) || attempt === 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  }
+
   afterEach(async () => {
-    await db.delete(activityLog);
+    await Promise.all(tempRoots.map((root) => fs.rm(root, { recursive: true, force: true })));
+    tempRoots.length = 0;
     await db.delete(costEvents);
-    await db.delete(heartbeatRuns);
+    await deleteHeartbeatRunsWithDependents();
     await db.delete(agentWakeupRequests);
     await db.delete(issueRelations);
+    await db.delete(issueComments);
     await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(pluginManagedResources);
+    await db.delete(projects);
+    await db.delete(plugins);
+    await db.delete(companyMemberships);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -88,6 +131,67 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     });
     return { companyId, agentId };
   }
+
+  async function makeLocalRoot() {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-plugin-host-folder-"));
+    tempRoots.push(root);
+    return root;
+  }
+
+  it("returns plugin-safe execution workspace metadata scoped to the company", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const otherCompanyId = randomUUID();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    await db.insert(companies).values({
+      id: otherCompanyId,
+      name: "Other",
+      issuePrefix: issuePrefix(otherCompanyId),
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspaces",
+      status: "in_progress",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: workspaceId,
+      companyId,
+      projectId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Feature workspace",
+      status: "active",
+      cwd: "/tmp/paperclip-feature",
+      repoUrl: "https://example.com/paperclip.git",
+      baseRef: "main",
+      branchName: "feature/workspace",
+      providerType: "git_worktree",
+      providerRef: "/tmp/paperclip-feature",
+      metadata: {
+        providerMetadata: { sandboxId: "sandbox-1" },
+        workspaceRealizationRequest: { hiddenInternal: true },
+      },
+    });
+
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.workspace", createEventBusStub());
+
+    await expect(services.executionWorkspaces.get({ workspaceId, companyId })).resolves.toMatchObject({
+      id: workspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId: null,
+      path: "/tmp/paperclip-feature",
+      cwd: "/tmp/paperclip-feature",
+      repoUrl: "https://example.com/paperclip.git",
+      baseRef: "main",
+      branchName: "feature/workspace",
+      providerType: "git_worktree",
+      providerMetadata: { sandboxId: "sandbox-1" },
+    });
+    await expect(services.executionWorkspaces.get({ workspaceId, companyId: otherCompanyId })).resolves.toBeNull();
+  });
 
   it("creates plugin-origin issues with full orchestration fields and audit activity", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
@@ -187,6 +291,293 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
         patch: { originKind: "plugin:other.plugin:feature" },
       }),
     ).rejects.toThrow("Plugin may only use originKind values under plugin:paperclip.missions");
+  });
+
+  it("creates plugin operation issues with the generic operation origin", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+
+    const issue = await services.issues.create({
+      companyId,
+      title: "Background operation",
+      surfaceVisibility: "plugin_operation",
+      originId: "mission-alpha:operation-1",
+    });
+
+    expect(issue.originKind).toBe("plugin:paperclip.missions:operation");
+    expect(issue.originId).toBe("mission-alpha:operation-1");
+  });
+
+  it("lets bootstrap-style actions initialize required local folders from an empty root", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginId = randomUUID();
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "paperclipai.plugin-llm-wiki",
+      packageName: "@paperclipai/plugin-llm-wiki",
+      version: "0.1.0",
+      manifestJson: {
+        id: "paperclipai.plugin-llm-wiki",
+        apiVersion: 1,
+        version: "0.1.0",
+        displayName: "LLM Wiki",
+        description: "Local-file LLM Wiki plugin",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: ["local.folders"],
+        entrypoints: { worker: "./dist/worker.js" },
+        localFolders: [
+          {
+            folderKey: "wiki-root",
+            displayName: "Wiki root",
+            access: "readWrite",
+            requiredDirectories: ["raw", "wiki", "wiki/concepts", ".paperclip"],
+            requiredFiles: ["WIKI.md", "AGENTS.md"],
+          },
+        ],
+      },
+      status: "ready",
+    });
+    const root = await makeLocalRoot();
+    const services = buildHostServices(
+      db,
+      pluginId,
+      "paperclipai.plugin-llm-wiki",
+      createEventBusStub(),
+      undefined,
+      {
+        manifest: {
+          id: "paperclipai.plugin-llm-wiki",
+          apiVersion: 1,
+          version: "0.1.0",
+          displayName: "LLM Wiki",
+          description: "Local-file LLM Wiki plugin",
+          author: "Paperclip",
+          categories: ["automation"],
+          capabilities: ["local.folders"],
+          entrypoints: { worker: "./dist/worker.js" },
+          localFolders: [
+            {
+              folderKey: "wiki-root",
+              displayName: "Wiki root",
+              access: "readWrite",
+              requiredDirectories: ["raw", "wiki", "wiki/concepts", ".paperclip"],
+              requiredFiles: ["WIKI.md", "AGENTS.md"],
+            },
+          ],
+        },
+      },
+    );
+
+    const configured = await services.localFolders.configure({
+      companyId,
+      folderKey: "wiki-root",
+      path: root,
+      access: "readWrite",
+      requiredDirectories: ["raw", "wiki", "wiki/concepts", ".paperclip"],
+      requiredFiles: ["WIKI.md", "AGENTS.md"],
+    });
+    expect(configured.healthy).toBe(false);
+    expect(configured.missingDirectories).toEqual([]);
+    expect(configured.missingFiles).toEqual(["WIKI.md", "AGENTS.md"]);
+
+    await fs.rm(path.join(root, "raw"), { recursive: true, force: true });
+    await fs.rm(path.join(root, "wiki"), { recursive: true, force: true });
+    await expect(services.localFolders.readText({ companyId, folderKey: "wiki-root", relativePath: "WIKI.md" }))
+      .rejects.toThrow("Local folder is not healthy");
+    await services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "wiki-root",
+      relativePath: "WIKI.md",
+      contents: "# Wiki\n",
+    });
+    await services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "wiki-root",
+      relativePath: "AGENTS.md",
+      contents: "# Agents\n",
+    });
+
+    const finalStatus = await services.localFolders.status({ companyId, folderKey: "wiki-root" });
+    expect(finalStatus.healthy).toBe(true);
+    await expect(fs.stat(path.join(root, "raw"))).resolves.toMatchObject({});
+    await expect(fs.stat(path.join(root, "wiki/concepts"))).resolves.toMatchObject({});
+    await expect(fs.readFile(path.join(root, "WIKI.md"), "utf8")).resolves.toBe("# Wiki\n");
+  });
+
+  it("rejects worker local-folder access for undeclared manifest keys", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginId = randomUUID();
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "paperclip.local-folders",
+      packageName: "@paperclip/plugin-local-folders",
+      version: "0.1.0",
+      manifestJson: {
+        id: "paperclip.local-folders",
+        apiVersion: 1,
+        version: "0.1.0",
+        displayName: "Local Folders",
+        description: "Local folder fixture",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: ["local.folders"],
+        entrypoints: { worker: "./dist/worker.js" },
+        localFolders: [
+          {
+            folderKey: "content-root",
+            displayName: "Content root",
+            access: "readWrite",
+          },
+        ],
+      },
+      status: "ready",
+    });
+    const services = buildHostServices(
+      db,
+      pluginId,
+      "paperclip.local-folders",
+      createEventBusStub(),
+      undefined,
+      {
+        manifest: {
+          id: "paperclip.local-folders",
+          apiVersion: 1,
+          version: "0.1.0",
+          displayName: "Local Folders",
+          description: "Local folder fixture",
+          author: "Paperclip",
+          categories: ["automation"],
+          capabilities: ["local.folders"],
+          entrypoints: { worker: "./dist/worker.js" },
+          localFolders: [
+            {
+              folderKey: "content-root",
+              displayName: "Content root",
+              access: "readWrite",
+            },
+          ],
+        },
+      },
+    );
+    await expect(services.localFolders.configure({
+      companyId,
+      folderKey: "ssh",
+      path: "/tmp",
+      access: "read",
+    })).rejects.toThrow("Local folder key is not declared");
+    await expect(services.localFolders.status({ companyId, folderKey: "ssh" }))
+      .rejects.toThrow("Local folder key is not declared");
+    await expect(services.localFolders.readText({ companyId, folderKey: "ssh", relativePath: "id_rsa" }))
+      .rejects.toThrow("Local folder key is not declared");
+    await expect(services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "ssh",
+      relativePath: "id_rsa",
+      contents: "secret",
+    })).rejects.toThrow("Local folder key is not declared");
+  });
+
+  it("resolves plugin-managed projects by stable key without overwriting user edits", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginId = randomUUID();
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "paperclip.missions",
+      packageName: "@paperclip/plugin-missions",
+      version: "0.1.0",
+      apiVersion: 1,
+      categories: ["automation"],
+      status: "ready",
+      manifestJson: {
+        id: "paperclip.missions",
+        apiVersion: 1,
+        version: "0.1.0",
+        displayName: "Missions",
+        description: "Mission orchestration",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: ["projects.managed"],
+        entrypoints: { worker: "./dist/worker.js" },
+        projects: [{
+          projectKey: "operations",
+          displayName: "Mission Operations",
+          description: "Plugin operation inspection area",
+          status: "in_progress",
+          color: "#14b8a6",
+          settings: { surface: "operations" },
+        }],
+      },
+    });
+
+    const services = buildHostServices(db, pluginId, "paperclip.missions", createEventBusStub());
+    const missing = await services.projects.getManaged({ companyId, projectKey: "operations" });
+    expect(missing.status).toBe("missing");
+    expect(missing.projectId).toBeNull();
+    await expect(
+      db
+        .select()
+        .from(pluginManagedResources)
+        .where(and(
+          eq(pluginManagedResources.companyId, companyId),
+          eq(pluginManagedResources.pluginId, pluginId),
+          eq(pluginManagedResources.resourceKind, "project"),
+          eq(pluginManagedResources.resourceKey, "operations"),
+        )),
+    ).resolves.toHaveLength(0);
+
+    const created = await services.projects.reconcileManaged({ companyId, projectKey: "operations" });
+
+    expect(created.status).toBe("created");
+    expect(created.projectId).toEqual(expect.any(String));
+    expect(created.project?.managedByPlugin).toMatchObject({
+      pluginId,
+      pluginKey: "paperclip.missions",
+      pluginDisplayName: "Missions",
+      resourceKind: "project",
+      resourceKey: "operations",
+    });
+
+    await db
+      .update(projects)
+      .set({ name: "Renamed by operator", description: "User-owned text", updatedAt: new Date() })
+      .where(eq(projects.id, created.projectId!));
+    await db
+      .update(plugins)
+      .set({
+        manifestJson: {
+          id: "paperclip.missions",
+          apiVersion: 1,
+          version: "0.2.0",
+          displayName: "Missions",
+          description: "Mission orchestration",
+          author: "Paperclip",
+          categories: ["automation"],
+          capabilities: ["projects.managed"],
+          entrypoints: { worker: "./dist/worker.js" },
+          projects: [{
+            projectKey: "operations",
+            displayName: "Upgraded Default Name",
+            description: "Upgraded default description",
+            status: "planned",
+            color: "#f97316",
+            settings: { surface: "operations", upgraded: true },
+          }],
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(plugins.id, pluginId));
+
+    const resolved = await services.projects.reconcileManaged({ companyId, projectKey: "operations" });
+
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.projectId).toBe(created.projectId);
+    expect(resolved.project?.name).toBe("Renamed by operator");
+    expect(resolved.project?.description).toBe("User-owned text");
+    expect(resolved.project?.managedByPlugin?.defaultsJson).toMatchObject({
+      displayName: "Upgraded Default Name",
+      settings: { upgraded: true },
+    });
   });
 
   it("asserts checkout ownership for run-scoped plugin actions", async () => {
@@ -368,5 +759,97 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       cachedInputTokens: 3,
       outputTokens: 6,
     });
+  });
+
+  it("rejects a human-attributed plugin comment when actorUserId is not an active company member", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Needs human input",
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.gateway", createEventBusStub());
+    await expect(
+      services.issues.createComment({
+        issueId,
+        companyId,
+        body: "Here's my answer",
+        actorUserId: randomUUID(),
+      }),
+    ).rejects.toThrow("is not an active human member of this company");
+
+    await expect(db.select().from(agentWakeupRequests)).resolves.toHaveLength(0);
+  });
+
+  it("creates a human-attributed plugin comment and wakes the issue's assignee", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const humanUserId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: humanUserId,
+      status: "active",
+      membershipRole: "owner",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Needs human input",
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    // Cap concurrency at 1 and pre-seed a running run so enqueueWakeup's
+    // queued-run bookkeeping is exercised without startNextQueuedRunForAgent
+    // going on to actually claim/execute the new run — that path spins up
+    // real environment/adapter orchestration this test has no business
+    // depending on (and which races the test's own db teardown).
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, agentId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: {},
+    });
+
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.gateway", createEventBusStub());
+    const comment = await services.issues.createComment({
+      issueId,
+      companyId,
+      body: "Here's my answer",
+      actorUserId: humanUserId,
+    });
+
+    expect(comment).toMatchObject({
+      authorType: "user",
+      authorUserId: humanUserId,
+      authorAgentId: null,
+      body: "Here's my answer",
+    });
+
+    const [wakeupRequest] = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId)));
+    expect(wakeupRequest).toMatchObject({
+      reason: "issue_commented",
+      requestedByActorType: "user",
+      requestedByActorId: humanUserId,
+    });
+    expect(wakeupRequest?.status).toBe("queued");
+    expect(wakeupRequest?.runId).toEqual(expect.any(String));
+
+    const [run] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, wakeupRequest!.runId!));
+    expect(run).toMatchObject({ agentId, companyId, status: "queued" });
   });
 });

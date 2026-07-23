@@ -3,6 +3,7 @@ import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
@@ -72,6 +73,10 @@ const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+
+type RestoreStatement =
+  | { type: "sql"; statement: string }
+  | { type: "copy"; statement: string; data: string };
 
 function sanitizeRestoreErrorMessage(error: unknown): string {
   if (error && typeof error === "object") {
@@ -249,12 +254,39 @@ function hasBackupTransforms(opts: RunDatabaseBackupOptions): boolean {
     Object.keys(opts.nullifyColumns ?? {}).length > 0;
 }
 
-function formatSqlValue(rawValue: unknown, columnName: string | undefined, nullifiedColumns: Set<string>): string {
+function formatPostgresArrayElement(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (Array.isArray(value)) return formatPostgresArrayLiteral(value);
+  const raw = value instanceof Date
+    ? value.toISOString()
+    : typeof value === "object"
+      ? JSON.stringify(value)
+      : String(value);
+  if (raw.length === 0 || /^null$/i.test(raw) || /[{}\s,"\\]/.test(raw)) {
+    return `"${raw.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  }
+  return raw;
+}
+
+function formatPostgresArrayLiteral(value: unknown[]): string {
+  return `{${value.map(formatPostgresArrayElement).join(",")}}`;
+}
+
+function formatSqlValue(
+  rawValue: unknown,
+  columnName: string | undefined,
+  nullifiedColumns: Set<string>,
+  dataType?: string,
+): string {
   const val = columnName && nullifiedColumns.has(columnName) ? null : rawValue;
   if (val === null || val === undefined) return "NULL";
+  if (dataType === "json" || dataType === "jsonb") {
+    return formatSqlLiteral(JSON.stringify(val));
+  }
   if (typeof val === "boolean") return val ? "true" : "false";
   if (typeof val === "number") return String(val);
   if (val instanceof Date) return formatSqlLiteral(val.toISOString());
+  if (Array.isArray(val)) return formatSqlLiteral(formatPostgresArrayLiteral(val));
   if (typeof val === "object") return formatSqlLiteral(JSON.stringify(val));
   return formatSqlLiteral(String(val));
 }
@@ -370,7 +402,18 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
   }
 }
 
-async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
+function isCopyFromStdinStatement(statement: string): boolean {
+  return /^COPY\s+[\s\S]+\s+FROM\s+stdin;$/i.test(statement.trim());
+}
+
+function hasOnlyRestoreComments(lines: string[]): boolean {
+  return lines.every((line) => {
+    const trimmed = line.trim();
+    return trimmed.length === 0 || trimmed.startsWith("--");
+  });
+}
+
+async function* readRestoreStatements(backupFile: string): AsyncGenerator<RestoreStatement> {
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
@@ -379,6 +422,8 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     crlfDelay: Infinity,
   });
   let statementLines: string[] = [];
+  let copyStatement: string | null = null;
+  let copyDataLines: string[] = [];
 
   const flushStatement = () => {
     const statement = statementLines.join("\n").trim();
@@ -388,10 +433,33 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
 
   try {
     for await (const line of reader) {
+      if (copyStatement !== null) {
+        if (line === "\\.") {
+          yield {
+            type: "copy",
+            statement: copyStatement,
+            data: copyDataLines.length > 0 ? `${copyDataLines.join("\n")}\n` : "",
+          };
+          copyStatement = null;
+          copyDataLines = [];
+          continue;
+        }
+        copyDataLines.push(line);
+        continue;
+      }
+
+      const trimmedLine = line.trim();
+      if (isCopyFromStdinStatement(trimmedLine) && hasOnlyRestoreComments(statementLines)) {
+        statementLines = [];
+        copyStatement = trimmedLine;
+        copyDataLines = [];
+        continue;
+      }
+
       if (line === STATEMENT_BREAKPOINT) {
         const statement = flushStatement();
         if (statement.length > 0) {
-          yield statement;
+          yield { type: "sql", statement };
         }
         continue;
       }
@@ -400,7 +468,10 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
 
     const trailingStatement = flushStatement();
     if (trailingStatement.length > 0) {
-      yield trailingStatement;
+      yield { type: "sql", statement: trailingStatement };
+    }
+    if (copyStatement !== null) {
+      throw new Error(`Unterminated COPY data in ${basename(backupFile)}`);
     }
   } finally {
     reader.close();
@@ -745,58 +816,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       emit("");
     }
 
-    // Foreign keys (after all tables created)
-    const allForeignKeys = await sql<{
-      constraint_name: string;
-      source_schema: string;
-      source_table: string;
-      source_columns: string[];
-      target_schema: string;
-      target_table: string;
-      target_columns: string[];
-      update_rule: string;
-      delete_rule: string;
-    }[]>`
-      SELECT
-        c.conname AS constraint_name,
-        srcn.nspname AS source_schema,
-        src.relname AS source_table,
-        array_agg(sa.attname ORDER BY array_position(c.conkey, sa.attnum)) AS source_columns,
-        tgtn.nspname AS target_schema,
-        tgt.relname AS target_table,
-        array_agg(ta.attname ORDER BY array_position(c.confkey, ta.attnum)) AS target_columns,
-        CASE c.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule,
-        CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule
-      FROM pg_constraint c
-      JOIN pg_class src ON src.oid = c.conrelid
-      JOIN pg_namespace srcn ON srcn.oid = src.relnamespace
-      JOIN pg_class tgt ON tgt.oid = c.confrelid
-      JOIN pg_namespace tgtn ON tgtn.oid = tgt.relnamespace
-      JOIN pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = ANY(c.conkey)
-      JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = ANY(c.confkey)
-      WHERE c.contype = 'f'
-        AND ${sql.unsafe(nonSystemSchemaPredicate("srcn.nspname"))}
-      GROUP BY c.conname, srcn.nspname, src.relname, tgtn.nspname, tgt.relname, c.confupdtype, c.confdeltype
-      ORDER BY srcn.nspname, src.relname, c.conname
-    `;
-    const fks = allForeignKeys.filter(
-      (fk) => includedTableNames.has(tableKey(fk.source_schema, fk.source_table))
-        && includedTableNames.has(tableKey(fk.target_schema, fk.target_table)),
-    );
-
-    if (fks.length > 0) {
-      emit("-- Foreign keys");
-      for (const fk of fks) {
-        const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
-        const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
-        emitStatement(
-          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule};`,
-        );
-      }
-      emit("");
-    }
-
-    // Unique constraints
+    // Unique constraints must exist before foreign keys that reference them.
     const allUniqueConstraints = await sql<{
       constraint_name: string;
       schema_name: string;
@@ -823,6 +843,58 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       for (const u of uniques) {
         const cols = u.column_names.map((c) => `"${c}"`).join(", ");
         emitStatement(`ALTER TABLE ${quoteQualifiedName(u.schema_name, u.tablename)} ADD CONSTRAINT "${u.constraint_name}" UNIQUE (${cols});`);
+      }
+      emit("");
+    }
+
+    // Foreign keys (after all tables and referenced unique constraints are created)
+    const allForeignKeys = await sql<{
+      constraint_name: string;
+      source_schema: string;
+      source_table: string;
+      source_columns: string[];
+      target_schema: string;
+      target_table: string;
+      target_columns: string[];
+      update_rule: string;
+      delete_rule: string;
+    }[]>`
+      SELECT
+        c.conname AS constraint_name,
+        srcn.nspname AS source_schema,
+        src.relname AS source_table,
+        array_agg(sa.attname ORDER BY key_columns.ordinal_position) AS source_columns,
+        tgtn.nspname AS target_schema,
+        tgt.relname AS target_table,
+        array_agg(ta.attname ORDER BY key_columns.ordinal_position) AS target_columns,
+        CASE c.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule,
+        CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule
+      FROM pg_constraint c
+      JOIN pg_class src ON src.oid = c.conrelid
+      JOIN pg_namespace srcn ON srcn.oid = src.relnamespace
+      JOIN pg_class tgt ON tgt.oid = c.confrelid
+      JOIN pg_namespace tgtn ON tgtn.oid = tgt.relnamespace
+      JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS key_columns(source_attnum, target_attnum, ordinal_position) ON true
+      JOIN pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = key_columns.source_attnum
+      JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = key_columns.target_attnum
+      WHERE c.contype = 'f'
+        AND ${sql.unsafe(nonSystemSchemaPredicate("srcn.nspname"))}
+      GROUP BY c.conname, srcn.nspname, src.relname, tgtn.nspname, tgt.relname, c.confupdtype, c.confdeltype
+      ORDER BY srcn.nspname, src.relname, c.conname
+    `;
+    const fks = allForeignKeys.filter(
+      (fk) => includedTableNames.has(tableKey(fk.source_schema, fk.source_table))
+        && includedTableNames.has(tableKey(fk.target_schema, fk.target_table)),
+    );
+
+    if (fks.length > 0) {
+      emit("-- Foreign keys");
+      for (const fk of fks) {
+        const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
+        const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
+        emitStatement(
+          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule};`,
+        );
       }
       emit("");
     }
@@ -895,7 +967,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       for await (const rows of rowCursor) {
         for (const row of rows) {
           const values = row.map((rawValue, index) =>
-            formatSqlValue(rawValue, cols[index]?.column_name, nullifiedColumns),
+            formatSqlValue(rawValue, cols[index]?.column_name, nullifiedColumns, cols[index]?.data_type),
           );
           emitStatement(`INSERT INTO ${qualifiedTableName} (${colNames}) VALUES (${values.join(", ")});`);
         }
@@ -957,10 +1029,12 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
 export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promise<void> {
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
+  let psqlRestoreError: unknown = null;
   try {
     await restoreWithPsql(opts, connectTimeout);
     return;
   } catch (error) {
+    psqlRestoreError = error;
     if (!(await hasStatementBreakpoints(opts.backupFile))) {
       throw new Error(
         `Failed to restore ${basename(opts.backupFile)} with psql: ${sanitizeRestoreErrorMessage(error)}`,
@@ -969,11 +1043,18 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
   }
 
   const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  let currentRestoreStatement: string | null = null;
 
   try {
     await sql`SELECT 1`;
-    for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
+    for await (const restoreStatement of readRestoreStatements(opts.backupFile)) {
+      currentRestoreStatement = restoreStatement.statement;
+      if (restoreStatement.type === "copy") {
+        const copyStream = await sql.unsafe(restoreStatement.statement).writable();
+        await pipeline(Readable.from(restoreStatement.data.length > 0 ? [restoreStatement.data] : []), copyStream);
+        continue;
+      }
+      await sql.unsafe(restoreStatement.statement).execute();
     }
   } catch (error) {
     const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"
@@ -981,9 +1062,14 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
         .split(/\r?\n/)
         .map((line) => line.trim())
         .find((line) => line.length > 0 && !line.startsWith("--"))
-      : null;
+      : currentRestoreStatement
+        ?.split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0 && !line.startsWith("--"))
+        ?? null;
+    const psqlMessage = psqlRestoreError === null ? "" : `; psql error: ${sanitizeRestoreErrorMessage(psqlRestoreError)}`;
     throw new Error(
-      `Failed to restore ${basename(opts.backupFile)}: ${sanitizeRestoreErrorMessage(error)}${statementPreview ? ` [statement: ${statementPreview.slice(0, 120)}]` : ""}`,
+      `Failed to restore ${basename(opts.backupFile)}: ${sanitizeRestoreErrorMessage(error)}${statementPreview ? ` [statement: ${statementPreview.slice(0, 120)}]` : ""}${psqlMessage}`,
     );
   } finally {
     await sql.end();
