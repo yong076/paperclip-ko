@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { i18n } from "./i18n";
 import {
   ONBOARDING_AGENT_STEP,
 } from "./lib/onboarding-route";
@@ -205,5 +206,27 @@ describe("the onboarding launcher's Add Agent button", () => {
     });
 
     expect(dialogState.openOnboarding).toHaveBeenCalledWith();
+  });
+
+  it("keeps Korean copy and starts at the current agent step", async () => {
+    const previousLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage("ko");
+      await render();
+      expect(container.textContent).toContain("Acme에 에이전트 추가하기");
+      const button = [...container.querySelectorAll("button")].find((item) =>
+        item.textContent?.includes("에이전트 추가"),
+      );
+      expect(button).toBeDefined();
+      await act(async () => {
+        button!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(dialogState.openOnboarding).toHaveBeenCalledWith({
+        initialStep: ONBOARDING_AGENT_STEP,
+        companyId: "company-1",
+      });
+    } finally {
+      await act(async () => { await i18n.changeLanguage(previousLanguage); });
+    }
   });
 });

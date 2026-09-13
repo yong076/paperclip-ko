@@ -33,6 +33,10 @@ if (typeof window !== "undefined" && window.localStorage !== globalThis.localSto
   installStorageMock(window as unknown as Record<string, unknown>);
 }
 
+// Upstream UI assertions use English. Korean cases switch language explicitly.
+if (typeof window !== "undefined") window.localStorage.setItem("paperclip-language", "en");
+else globalThis.localStorage.setItem("paperclip-language", "en");
+
 // jsdom does not implement Element.prototype.scrollIntoView. Several surfaces
 // (e.g. IssueChatThread's auto-scroll-to-latest) call it during normal render,
 // so provide a no-op default. Tests that assert on scroll behaviour override

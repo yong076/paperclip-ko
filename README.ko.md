@@ -121,7 +121,7 @@ cd paperclip-ko
 pnpm install
 ```
 
-필요 조건은 Node.js 20+와 pnpm 9.15+입니다.
+필요 조건은 Node.js 24.11+와 pnpm 9.15+입니다. 소스에서 전체 빌드하려면 Rust와 rustfmt도 필요합니다.
 
 ### 3. 한국어판 실행
 
@@ -413,7 +413,7 @@ pnpm dev
 
 이렇게 하면 API 서버가 `http://localhost:3100`에서 시작됩니다. 임베디드 PostgreSQL 데이터베이스가 자동으로 생성돼요 — 별도 셋업 불필요.
 
-> **요구사항:** Node.js 20+, pnpm 9.15+
+> **요구사항:** Node.js 24.11+, pnpm 9.15+, 소스 전체 빌드 시 Rust와 rustfmt
 
 <br/>
 
