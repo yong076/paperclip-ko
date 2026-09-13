@@ -10,5 +10,9 @@ permissions:
 
 jobs:
   ci:
+    if: github.repository != 'yong076/paperclip-ko'
     # Pin: #13300 merge — restore-only dependency caches and parallel native verification.
     uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@44dde2dec42a22746a2f36b595acacc9ccfa1df6
+  fork:
+    if: github.repository == 'yong076/paperclip-ko'
+    uses: ./.github/workflows/pr-trusted.yml

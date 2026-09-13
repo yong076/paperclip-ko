@@ -276,6 +276,18 @@ jobs:
           # do not masquerade as changes made by the PR itself.
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
+            # A fork sync imports upstream's lockfile as part of its history.
+            # Permit only the exact file from a verified upstream ancestor.
+            if [ "${{ github.repository }}" = 'yong076/paperclip-ko' ]; then
+              git fetch --no-tags https://github.com/paperclipai/paperclip.git master
+              upstream_base="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
+              branch_lock="$(git rev-parse '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml')"
+              upstream_lock="$(git rev-parse "$upstream_base:pnpm-lock.yaml")"
+              if [ "$branch_lock" = "$upstream_lock" ]; then
+                echo "Lockfile matches the imported upstream commit $upstream_base."
+                exit 0
+              fi
+            fi
             echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
             exit 1
           fi
