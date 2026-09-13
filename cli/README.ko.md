@@ -5,7 +5,7 @@ Paperclip CLI는 instance setup, diagnostics, control-plane operation을 담당�
 ## 빠른 시작
 
 ```sh
-pnpm paperclipai run
+./scripts/paperclip-ko run
 ```
 
 이 명령은 config가 없으면 onboard하고, doctor check를 실행한 뒤 server를 시작합니다.

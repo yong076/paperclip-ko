@@ -10,7 +10,7 @@ Paperclip CLI는 instance setup, diagnostics, control-plane operation을 처리�
 ## 기본 사용
 
 ```sh
-pnpm paperclipai --help
+./scripts/paperclip-ko --help
 ```
 
 ## Global options
@@ -29,7 +29,7 @@ Company scoped command는 `--company-id <id>`도 받을 수 있습니다.
 깨끗한 로컬 instance를 쓰려면 `--data-dir`를 명시합니다.
 
 ```sh
-pnpm paperclipai run --data-dir ./tmp/paperclip-dev
+./scripts/paperclip-ko run --data-dir ./tmp/paperclip-dev
 ```
 
 ## Context profiles
@@ -37,16 +37,16 @@ pnpm paperclipai run --data-dir ./tmp/paperclip-dev
 반복 flag를 줄이려면 context profile을 설정합니다.
 
 ```sh
-pnpm paperclipai context set --api-base http://localhost:3100 --company-id <id>
-pnpm paperclipai context show
-pnpm paperclipai context list
-pnpm paperclipai context use default
+./scripts/paperclip-ko context set --api-base http://localhost:3100 --company-id <id>
+./scripts/paperclip-ko context show
+./scripts/paperclip-ko context list
+./scripts/paperclip-ko context use default
 ```
 
 secret을 context 파일에 저장하지 않으려면 환경 변수 이름만 저장합니다.
 
 ```sh
-pnpm paperclipai context set --api-key-env-var-name PAPERCLIP_API_KEY
+./scripts/paperclip-ko context set --api-key-env-var-name PAPERCLIP_API_KEY
 export PAPERCLIP_API_KEY=...
 ```
 

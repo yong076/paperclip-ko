@@ -22,7 +22,7 @@ Paperclip은 issue attachment, image 같은 uploaded file을 configurable storag
 production이나 multi-node deployment에서는 AWS S3, MinIO, Cloudflare R2 같은 S3-compatible object storage를 사용할 수 있습니다.
 
 ```sh
-pnpm paperclipai configure --section storage
+./scripts/paperclip-ko configure --section storage
 ```
 
 ## Provider 선택

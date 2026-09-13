@@ -1237,6 +1237,7 @@ function scheduleDeferredPasses() {
 export function syncKoreanRuntimeTranslation(language: string) {
   const shouldActivate = language.toLowerCase().startsWith("ko");
   active = shouldActivate;
+  if (typeof document === "undefined" || typeof window === "undefined") return;
   document.documentElement.lang = shouldActivate ? "ko" : "en";
 
   if (!shouldActivate) {

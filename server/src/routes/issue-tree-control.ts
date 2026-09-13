@@ -1,16 +1,29 @@
 import { Router } from "express";
 import type { Request } from "express";
-import type { Db } from "@paperclipai/db";
+import {
+  issues as issueRows,
+  type Db,
+} from "@paperclipai/db";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { conflict } from "../errors.js";
 import {
   createIssueTreeHoldSchema,
+  isUuidLike,
   previewIssueTreeControlSchema,
   releaseIssueTreeHoldSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { heartbeatService, issueService, issueTreeControlService, logActivity } from "../services/index.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import {
+  heartbeatService,
+  issueService,
+  issueTreeControlService,
+  logActivity,
+} from "../services/index.js";
+import { assertBoard, getAccessibleResource, getActorInfo } from "./authz.js";
 
 const TREE_RUN_CANCELLATION_RESPONSE_WAIT_MS = 1_000;
+const RESUME_EXECUTABLE_STATUSES = ["todo", "in_progress", "in_review"];
 
 function errorToMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -44,12 +57,8 @@ export function issueTreeControlRoutes(db: Db) {
 
   router.post("/issues/:id/tree-control/preview", validate(previewIssueTreeControlSchema), async (req, res) => {
     assertBoard(req);
-    const root = await resolveRootIssue(req);
-    if (!root) {
-      res.status(404).json({ error: "Root issue not found" });
-      return;
-    }
-    assertCompanyAccess(req, root.companyId);
+    const root = await getAccessibleResource(req, res, resolveRootIssue(req), "Root issue not found");
+    if (!root) return;
 
     const preview = await treeControlSvc.preview(root.companyId, root.id, req.body);
     const actor = getActorInfo(req);
@@ -59,6 +68,7 @@ export function issueTreeControlRoutes(db: Db) {
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
       action: "issue.tree_control_previewed",
       entityType: "issue",
       entityId: root.id,
@@ -74,12 +84,8 @@ export function issueTreeControlRoutes(db: Db) {
 
   router.post("/issues/:id/tree-holds", validate(createIssueTreeHoldSchema), async (req, res) => {
     assertBoard(req);
-    const root = await resolveRootIssue(req);
-    if (!root) {
-      res.status(404).json({ error: "Root issue not found" });
-      return;
-    }
-    assertCompanyAccess(req, root.companyId);
+    const root = await getAccessibleResource(req, res, resolveRootIssue(req), "Root issue not found");
+    if (!root) return;
 
     const actor = getActorInfo(req);
     const actorInput = {
@@ -99,6 +105,7 @@ export function issueTreeControlRoutes(db: Db) {
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
       action: "issue.tree_hold_created",
       entityType: "issue",
       entityId: root.id,
@@ -117,13 +124,26 @@ export function issueTreeControlRoutes(db: Db) {
       for (const heartbeatRunId of interruptedRunIds) {
         const cancellationTask = (async () => {
           try {
-            await heartbeat.cancelRun(heartbeatRunId);
+            // This board-only operation is an intentional interruption, just
+            // like composer Stop. Preserve its actor so verified native stops
+            // do not manufacture recovery incidents while the hold is active.
+            await heartbeat.cancelRun(
+              heartbeatRunId,
+              `Cancelled by a board operator's subtree ${result.hold.mode}`,
+              {
+                resultJson: {
+                  cancelledByActorType: "user",
+                  cancelledByUserId: req.actor.userId ?? null,
+                },
+              },
+            );
             await logActivity(db, {
               companyId: root.companyId,
               actorType: actor.actorType,
               actorId: actor.actorId,
               agentId: actor.agentId,
               runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
               action: "issue.tree_hold_run_interrupted",
               entityType: "heartbeat_run",
               entityId: heartbeatRunId,
@@ -140,6 +160,7 @@ export function issueTreeControlRoutes(db: Db) {
               actorId: actor.actorId,
               agentId: actor.agentId,
               runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
               action: "issue.tree_hold_run_interrupt_failed",
               entityType: "heartbeat_run",
               entityId: heartbeatRunId,
@@ -169,6 +190,7 @@ export function issueTreeControlRoutes(db: Db) {
           actorId: actor.actorId,
           agentId: actor.agentId,
           runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
           action: "issue.tree_hold_wakeup_deferred",
           entityType: "agent_wakeup_request",
           entityId: wakeup.id,
@@ -190,6 +212,7 @@ export function issueTreeControlRoutes(db: Db) {
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
         action: "issue.tree_cancel_status_updated",
         entityType: "issue",
         entityId: root.id,
@@ -231,6 +254,7 @@ export function issueTreeControlRoutes(db: Db) {
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
         action: "issue.tree_restore_status_updated",
         entityType: "issue",
         entityId: root.id,
@@ -277,9 +301,11 @@ export function issueTreeControlRoutes(db: Db) {
             actorId: actor.actorId,
             agentId: actor.agentId,
             runId: actor.runId,
+            agentApiKeyId: actor.agentApiKeyId,
             action: "issue.tree_restore_wakeup_requested",
             entityType: "heartbeat_run",
             entityId: wakeRun.id,
+            issueId: restoredIssue.id,
             details: {
               holdId: result.hold.id,
               rootIssueId: root.id,
@@ -299,24 +325,16 @@ export function issueTreeControlRoutes(db: Db) {
   router.get("/issues/:id/tree-control/state", async (req, res) => {
     assertBoard(req);
     const issueId = req.params.id as string;
-    const issue = await issuesSvc.getById(issueId);
-    if (!issue) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
-    assertCompanyAccess(req, issue.companyId);
+    const issue = await getAccessibleResource(req, res, issuesSvc.getById(issueId), "Issue not found");
+    if (!issue) return;
     const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id);
     res.json({ activePauseHold });
   });
 
   router.get("/issues/:id/tree-holds", async (req, res) => {
     assertBoard(req);
-    const root = await resolveRootIssue(req);
-    if (!root) {
-      res.status(404).json({ error: "Root issue not found" });
-      return;
-    }
-    assertCompanyAccess(req, root.companyId);
+    const root = await getAccessibleResource(req, res, resolveRootIssue(req), "Root issue not found");
+    if (!root) return;
     const statusParam = typeof req.query.status === "string" ? req.query.status : null;
     const modeParam = typeof req.query.mode === "string" ? req.query.mode : null;
     const includeMembers = req.query.includeMembers === "true";
@@ -333,14 +351,16 @@ export function issueTreeControlRoutes(db: Db) {
 
   router.get("/issues/:id/tree-holds/:holdId", async (req, res) => {
     assertBoard(req);
-    const root = await resolveRootIssue(req);
-    if (!root) {
-      res.status(404).json({ error: "Root issue not found" });
+    const root = await getAccessibleResource(req, res, resolveRootIssue(req), "Root issue not found");
+    if (!root) return;
+
+    const holdId = req.params.holdId as string;
+    if (!isUuidLike(holdId)) {
+      res.status(400).json({ error: "Invalid hold ID" });
       return;
     }
-    assertCompanyAccess(req, root.companyId);
 
-    const hold = await treeControlSvc.getHold(root.companyId, req.params.holdId as string);
+    const hold = await treeControlSvc.getHold(root.companyId, holdId);
     if (!hold || hold.rootIssueId !== root.id) {
       res.status(404).json({ error: "Issue tree hold not found" });
       return;
@@ -353,30 +373,65 @@ export function issueTreeControlRoutes(db: Db) {
     validate(releaseIssueTreeHoldSchema),
     async (req, res) => {
       assertBoard(req);
-      const root = await resolveRootIssue(req);
-      if (!root) {
-        res.status(404).json({ error: "Root issue not found" });
+      const root = await getAccessibleResource(
+        req,
+        res,
+        resolveRootIssue(req),
+        "Root issue not found",
+      );
+      if (!root) return;
+
+      const holdId = req.params.holdId as string;
+      if (!isUuidLike(holdId)) {
+        res.status(400).json({ error: "Invalid hold ID" });
         return;
       }
-      assertCompanyAccess(req, root.companyId);
 
+      // Releasing a pause does not authorize replay of uncertain provider actions.
+      // Check before release so a rejected wake leaves the subtree paused.
+      if (req.body.metadata?.wakeAgents === true) {
+        const activeHold = await treeControlSvc.getHold(root.companyId, holdId);
+        const issueIds =
+          activeHold?.mode === "pause" && activeHold.rootIssueId === root.id
+            ? (activeHold.members ?? [])
+                .filter((member) => !member.skipped)
+                .map((member) => member.issueId)
+            : [];
+        if (issueIds.length > 0) {
+          const candidates = await db.select({ id: issueRows.id, identifier: issueRows.identifier })
+            .from(issueRows).where(and(
+              eq(issueRows.companyId, root.companyId), inArray(issueRows.id, issueIds),
+              inArray(issueRows.status, RESUME_EXECUTABLE_STATUSES), isNotNull(issueRows.assigneeAgentId),
+            ));
+          for (const task of candidates) {
+            const blocked = await getExecutionBlocker(db, root.companyId, task.id);
+            if (blocked) throw conflict(`Cannot wake ${task.identifier ?? "this task"}: ${blocked.nextAction}`);
+          }
+        }
+      }
       const actor = getActorInfo(req);
-      const hold = await treeControlSvc.releaseHold(root.companyId, root.id, req.params.holdId as string, {
-        ...req.body,
-        actor: {
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-          runId: actor.runId,
+      const hold = await treeControlSvc.releaseHold(
+        root.companyId,
+        root.id,
+        holdId,
+        {
+          ...req.body,
+          actor: {
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            userId: actor.actorType === "user" ? actor.actorId : null,
+            runId: actor.runId,
+          },
         },
-      });
+      );
       await logActivity(db, {
         companyId: root.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
         action: "issue.tree_hold_released",
         entityType: "issue",
         entityId: root.id,
@@ -388,7 +443,65 @@ export function issueTreeControlRoutes(db: Db) {
         },
       });
 
-      res.json(hold);
+      const wakeFailures: Array<{ issueId: string; message: string }> = [];
+      if (hold.mode === "pause" && req.body.metadata?.wakeAgents === true) {
+        for (const member of hold.members ?? []) {
+          if (member.skipped) continue;
+          try {
+            const issue = await issuesSvc.getById(member.issueId);
+            if (
+              !issue ||
+              issue.companyId !== root.companyId ||
+              !issue.assigneeAgentId ||
+              !RESUME_EXECUTABLE_STATUSES.includes(issue.status)
+            )
+              continue;
+            await heartbeat.wakeup(issue.assigneeAgentId, {
+              source: "assignment",
+              triggerDetail: "system",
+              reason: "issue_tree_resumed",
+              payload: {
+                issueId: issue.id,
+                rootIssueId: root.id,
+                holdId: hold.id,
+              },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: issue.id,
+                taskId: issue.id,
+                wakeReason: "issue_tree_resumed",
+                source: "issue.tree_resume",
+                rootIssueId: root.id,
+                holdId: hold.id,
+              },
+            });
+          } catch (error) {
+            const message = errorToMessage(error);
+            wakeFailures.push({ issueId: member.issueId, message });
+            await Promise.resolve(
+              logActivity(db, {
+                companyId: root.companyId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+                agentId: actor.agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "issue.tree_resume_wake_failed",
+                entityType: "issue",
+                entityId: root.id,
+                details: {
+                  holdId: hold.id,
+                  issueId: member.issueId,
+                  error: message,
+                },
+              }),
+            ).catch(() => null);
+          }
+        }
+      }
+
+      res.json({ ...hold, ...(wakeFailures.length ? { wakeFailures } : {}) });
     },
   );
 

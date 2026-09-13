@@ -28,7 +28,7 @@ Tailscale, VPN, LAN 같은 private network 접근용입니다.
 custom Tailscale hostname 허용:
 
 ```sh
-pnpm paperclipai allowed-hostname my-machine
+./scripts/paperclip-ko allowed-hostname my-machine
 ```
 
 ## `authenticated` + `public`
@@ -53,11 +53,11 @@ internet-facing deployment용입니다.
 ## 모드 변경
 
 ```sh
-pnpm paperclipai configure --section server
+./scripts/paperclip-ko configure --section server
 ```
 
 환경 변수 override:
 
 ```sh
-PAPERCLIP_DEPLOYMENT_MODE=authenticated PAPERCLIP_BIND=lan pnpm paperclipai run
+PAPERCLIP_DEPLOYMENT_MODE=authenticated PAPERCLIP_BIND=lan ./scripts/paperclip-ko run
 ```

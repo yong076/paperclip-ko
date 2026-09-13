@@ -50,7 +50,7 @@ Paperclip이 managed worktree instance에서 실행 중이면 worktree-isolated 
 ## Manual local CLI
 
 ```sh
-pnpm paperclipai agent local-cli codexcoder --company-id <company-id>
+./scripts/paperclip-ko agent local-cli codexcoder --company-id <company-id>
 ```
 
 필요한 skill을 설치하고 agent API key를 만든 뒤, 해당 agent로 실행할 shell export를 출력합니다.

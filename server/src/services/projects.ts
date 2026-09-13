@@ -1,19 +1,34 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { projects, projectGoals, goals, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
-  PROJECT_COLORS,
+  projects,
+  projectGoals,
+  goals,
+  issues,
+  budgetPolicies,
+  pluginManagedResources,
+  plugins,
+  projectWorkspaces,
+  workspaceRuntimeServices,
+} from "@paperclipai/db";
+import {
   deriveProjectUrlKey,
   hasNonAsciiContent,
   isUuidLike,
   normalizeProjectUrlKey,
+  type BudgetWindowKind,
+  type ProjectBudgetSummary,
   type ProjectCodebase,
   type ProjectExecutionWorkspacePolicy,
   type ProjectGoalRef,
+  type ProjectManagedByPlugin,
   type ProjectWorkspaceRuntimeConfig,
   type ProjectWorkspace,
   type WorkspaceRuntimeService,
+  type PluginManagedProjectDeclaration,
+  type PluginManagedProjectResolution,
 } from "@paperclipai/shared";
+import { unprocessable } from "../errors.js";
 import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runtime-read-model.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
@@ -50,6 +65,9 @@ interface ProjectWithGoals extends Omit<ProjectRow, "executionWorkspacePolicy"> 
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];
   primaryWorkspace: ProjectWorkspace | null;
+  managedByPlugin: ProjectManagedByPlugin | null;
+  taskCount?: number;
+  budget?: ProjectBudgetSummary | null;
 }
 
 interface ProjectShortnameRow {
@@ -245,6 +263,40 @@ async function attachWorkspaces(db: Db, rows: ProjectWithGoals[]): Promise<Proje
     arr.push(row);
   }
 
+  const managedRows = await db
+    .select({
+      id: pluginManagedResources.id,
+      pluginId: pluginManagedResources.pluginId,
+      pluginKey: pluginManagedResources.pluginKey,
+      manifestJson: plugins.manifestJson,
+      resourceKind: pluginManagedResources.resourceKind,
+      resourceKey: pluginManagedResources.resourceKey,
+      resourceId: pluginManagedResources.resourceId,
+      defaultsJson: pluginManagedResources.defaultsJson,
+      createdAt: pluginManagedResources.createdAt,
+      updatedAt: pluginManagedResources.updatedAt,
+    })
+    .from(pluginManagedResources)
+    .innerJoin(plugins, eq(pluginManagedResources.pluginId, plugins.id))
+    .where(and(
+      eq(pluginManagedResources.resourceKind, "project"),
+      inArray(pluginManagedResources.resourceId, projectIds),
+    ));
+  const managedByProjectId = new Map<string, ProjectManagedByPlugin>();
+  for (const row of managedRows) {
+    managedByProjectId.set(row.resourceId, {
+      id: row.id,
+      pluginId: row.pluginId,
+      pluginKey: row.pluginKey,
+      pluginDisplayName: row.manifestJson.displayName ?? row.pluginKey,
+      resourceKind: "project",
+      resourceKey: row.resourceKey,
+      defaultsJson: row.defaultsJson,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
   return rows.map((row) => {
     const projectWorkspaceRows = map.get(row.id) ?? [];
     const workspaces = projectWorkspaceRows.map((workspace) =>
@@ -264,11 +316,117 @@ async function attachWorkspaces(db: Db, rows: ProjectWithGoals[]): Promise<Proje
       }),
       workspaces,
       primaryWorkspace,
+      managedByPlugin: managedByProjectId.get(row.id) ?? null,
     };
   });
 }
 
+type TaskCountRow = { projectId: string | null; count: number };
+type ProjectBudgetRow = { scopeId: string; amount: number; windowKind: string };
+
+/**
+ * Build the per-project task-count and budget lookups from the aggregate query
+ * rows. Pure (no DB) so the merge logic can be unit-tested in isolation.
+ * Only active policies with a positive amount surface as a budget.
+ */
+export function buildProjectListMetricMaps(taskCountRows: TaskCountRow[], budgetRows: ProjectBudgetRow[]) {
+  const taskCountByProjectId = new Map<string, number>();
+  for (const row of taskCountRows) {
+    if (row.projectId) taskCountByProjectId.set(row.projectId, Number(row.count) || 0);
+  }
+
+  const budgetByProjectId = new Map<string, ProjectBudgetSummary>();
+  for (const row of budgetRows) {
+    if (row.amount > 0) {
+      budgetByProjectId.set(row.scopeId, {
+        amountCents: row.amount,
+        windowKind: row.windowKind as BudgetWindowKind,
+      });
+    }
+  }
+
+  return { taskCountByProjectId, budgetByProjectId };
+}
+
+/**
+ * Attach lightweight list-only metrics (task count + budget) to a set of
+ * projects using two aggregate queries (no N+1). Used by the projects list
+ * view (IA Phase 4 — PAP-60).
+ */
+async function attachListMetrics(
+  db: Db,
+  companyId: string,
+  rows: ProjectWithGoals[],
+): Promise<ProjectWithGoals[]> {
+  if (rows.length === 0) return rows;
+
+  const projectIds = rows.map((r) => r.id);
+
+  const [taskCountRows, budgetRows] = await Promise.all([
+    db
+      .select({
+        projectId: issues.projectId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.projectId, projectIds), isNull(issues.conversationAgentId)))
+      .groupBy(issues.projectId),
+    db
+      .select({
+        scopeId: budgetPolicies.scopeId,
+        amount: budgetPolicies.amount,
+        windowKind: budgetPolicies.windowKind,
+      })
+      .from(budgetPolicies)
+      .where(
+        and(
+          eq(budgetPolicies.companyId, companyId),
+          eq(budgetPolicies.scopeType, "project"),
+          eq(budgetPolicies.metric, "billed_cents"),
+          eq(budgetPolicies.isActive, true),
+          inArray(budgetPolicies.scopeId, projectIds),
+        ),
+      ),
+  ]);
+
+  const { taskCountByProjectId, budgetByProjectId } = buildProjectListMetricMaps(
+    taskCountRows,
+    budgetRows,
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    taskCount: taskCountByProjectId.get(row.id) ?? 0,
+    budget: budgetByProjectId.get(row.id) ?? null,
+  }));
+}
+
 /** Sync the project_goals join table for a single project. */
+/**
+ * Every goal a project links to must exist and belong to the same company.
+ * Without this check a nonexistent id only dies at the projects.goal_id
+ * foreign key — an opaque 500 the caller retries (observed live
+ * 2026-09-03: four identical retries of one bad id) — and a goal from
+ * another company would link silently, because the foreign key proves
+ * existence, not ownership.
+ */
+async function assertGoalsBelongToCompany(db: Db, companyId: string, goalIds: string[]): Promise<void> {
+  if (goalIds.length === 0) return;
+  const unique = [...new Set(goalIds)];
+  const found = await db
+    .select({ id: goals.id })
+    .from(goals)
+    .where(and(eq(goals.companyId, companyId), inArray(goals.id, unique)));
+  const foundIds = new Set(found.map((row) => row.id));
+  const unknown = unique.filter((goalId) => !foundIds.has(goalId));
+  if (unknown.length > 0) {
+    throw unprocessable(
+      `Unknown goal id(s) for this company: ${unknown.join(", ")}`,
+      { unknownGoalIds: unknown },
+    );
+  }
+}
+
 async function syncGoalLinks(db: Db, projectId: string, companyId: string, goalIds: string[]) {
   // Delete existing links
   await db.delete(projectGoals).where(eq(projectGoals.projectId, projectId));
@@ -337,6 +495,17 @@ function deriveWorkspaceName(input: {
   return "Workspace";
 }
 
+function buildManagedProjectDefaults(declaration: PluginManagedProjectDeclaration) {
+  return {
+    projectKey: declaration.projectKey,
+    displayName: declaration.displayName,
+    description: declaration.description ?? null,
+    status: declaration.status ?? "in_progress",
+    color: declaration.color ?? null,
+    settings: declaration.settings ?? {},
+  };
+}
+
 export function resolveProjectNameForUniqueShortname(
   requestedName: string,
   existingProjects: ProjectShortnameRow[],
@@ -398,11 +567,73 @@ async function ensureSinglePrimaryWorkspace(
 }
 
 export function projectService(db: Db) {
+  const createProject = async (
+    companyId: string,
+    data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
+  ): Promise<ProjectWithGoals> => {
+    const { goalIds: inputGoalIds, ...projectData } = data;
+    const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
+    if (ids && ids.length > 0) await assertGoalsBelongToCompany(db, companyId, ids);
+
+    // Note: color is intentionally NOT auto-assigned. New projects default to
+    // `color = null` (neutral gray) unless an explicit color is supplied. See PAP-68.
+
+    const existingProjects = await db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(eq(projects.companyId, companyId));
+    projectData.name = resolveProjectNameForUniqueShortname(projectData.name, existingProjects);
+
+    // Also write goalId to the legacy column (first goal or null)
+    // The resolved set is canonical for persistence as well as validation:
+    // falling back to the raw legacy field here would write an id that
+    // skipped validation whenever `goalIds: []` and `goalId` arrive
+    // together (goalIds wins resolution, mirroring the update path).
+    const legacyGoalId = ids?.[0] ?? null;
+
+    const row = await db
+      .insert(projects)
+      .values({ ...projectData, goalId: legacyGoalId, companyId })
+      .returning()
+      .then((rows) => rows[0]);
+
+    if (ids && ids.length > 0) {
+      await syncGoalLinks(db, row.id, companyId, ids);
+    }
+
+    const [withGoals] = await attachGoals(db, [row]);
+    const [enriched] = withGoals ? await attachWorkspaces(db, [withGoals]) : [];
+    return enriched!;
+  };
+
+  const getProjectById = async (id: string): Promise<ProjectWithGoals | null> => {
+    const row = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, id))
+      .then((rows) => rows[0] ?? null);
+    if (!row) return null;
+    const [withGoals] = await attachGoals(db, [row]);
+    if (!withGoals) return null;
+    const [enriched] = await attachWorkspaces(db, [withGoals]);
+    return enriched ?? null;
+  };
+
   return {
-    list: async (companyId: string): Promise<ProjectWithGoals[]> => {
-      const rows = await db.select().from(projects).where(eq(projects.companyId, companyId));
+    list: async (companyId: string, opts: { includeArchived?: boolean } = {}): Promise<ProjectWithGoals[]> => {
+      // NOTE: this service default is intentionally the inverse of the HTTP route default.
+      // The route (`GET /companies/:companyId/projects`) defaults `includeArchived` to `false`
+      // (active-only) for its callers, but the service defaults to `true` so that existing
+      // server-internal callers that pass no opts keep their pre-existing "return everything,
+      // including archived" behaviour. Pass `{ includeArchived: false }` explicitly for active-only.
+      const includeArchived = opts.includeArchived ?? true;
+      const where = includeArchived
+        ? eq(projects.companyId, companyId)
+        : and(eq(projects.companyId, companyId), isNull(projects.archivedAt));
+      const rows = await db.select().from(projects).where(where);
       const withGoals = await attachGoals(db, rows);
-      return attachWorkspaces(db, withGoals);
+      const withWorkspaces = await attachWorkspaces(db, withGoals);
+      return attachListMetrics(db, companyId, withWorkspaces);
     },
 
     listByIds: async (companyId: string, ids: string[]): Promise<ProjectWithGoals[]> => {
@@ -418,57 +649,215 @@ export function projectService(db: Db) {
       return dedupedIds.map((id) => byId.get(id)).filter((project): project is ProjectWithGoals => Boolean(project));
     },
 
-    getById: async (id: string): Promise<ProjectWithGoals | null> => {
-      const row = await db
-        .select()
-        .from(projects)
-        .where(eq(projects.id, id))
+    getById: getProjectById,
+
+    resolveManagedProject: async (input: {
+      companyId: string;
+      pluginId: string;
+      pluginKey: string;
+      projectKey: string;
+      reset?: boolean;
+      createIfMissing?: boolean;
+    }): Promise<PluginManagedProjectResolution> => {
+      const plugin = await db
+        .select({ id: plugins.id, pluginKey: plugins.pluginKey, manifestJson: plugins.manifestJson })
+        .from(plugins)
+        .where(eq(plugins.id, input.pluginId))
         .then((rows) => rows[0] ?? null);
-      if (!row) return null;
-      const [withGoals] = await attachGoals(db, [row]);
-      if (!withGoals) return null;
-      const [enriched] = await attachWorkspaces(db, [withGoals]);
-      return enriched ?? null;
-    },
-
-    create: async (
-      companyId: string,
-      data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
-    ): Promise<ProjectWithGoals> => {
-      const { goalIds: inputGoalIds, ...projectData } = data;
-      const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
-
-      // Auto-assign a color from the palette if none provided
-      if (!projectData.color) {
-        const existing = await db.select({ color: projects.color }).from(projects).where(eq(projects.companyId, companyId));
-        const usedColors = new Set(existing.map((r) => r.color).filter(Boolean));
-        const nextColor = PROJECT_COLORS.find((c) => !usedColors.has(c)) ?? PROJECT_COLORS[existing.length % PROJECT_COLORS.length];
-        projectData.color = nextColor;
+      if (!plugin || plugin.pluginKey !== input.pluginKey) {
+        return {
+          pluginKey: input.pluginKey,
+          resourceKind: "project",
+          resourceKey: input.projectKey,
+          companyId: input.companyId,
+          projectId: null,
+          project: null,
+          status: "missing",
+        };
       }
 
-      const existingProjects = await db
-        .select({ id: projects.id, name: projects.name })
-        .from(projects)
-        .where(eq(projects.companyId, companyId));
-      projectData.name = resolveProjectNameForUniqueShortname(projectData.name, existingProjects);
-
-      // Also write goalId to the legacy column (first goal or null)
-      const legacyGoalId = ids && ids.length > 0 ? ids[0] : projectData.goalId ?? null;
-
-      const row = await db
-        .insert(projects)
-        .values({ ...projectData, goalId: legacyGoalId, companyId })
-        .returning()
-        .then((rows) => rows[0]);
-
-      if (ids && ids.length > 0) {
-        await syncGoalLinks(db, row.id, companyId, ids);
+      const declaration = plugin.manifestJson.projects?.find((project) => project.projectKey === input.projectKey);
+      if (!declaration) {
+        return {
+          pluginKey: input.pluginKey,
+          resourceKind: "project",
+          resourceKey: input.projectKey,
+          companyId: input.companyId,
+          projectId: null,
+          project: null,
+          status: "missing",
+        };
       }
 
-      const [withGoals] = await attachGoals(db, [row]);
-      const [enriched] = withGoals ? await attachWorkspaces(db, [withGoals]) : [];
-      return enriched!;
+      const defaults = buildManagedProjectDefaults(declaration);
+      const existingBinding = await db
+        .select()
+        .from(pluginManagedResources)
+        .where(and(
+          eq(pluginManagedResources.companyId, input.companyId),
+          eq(pluginManagedResources.pluginId, input.pluginId),
+          eq(pluginManagedResources.resourceKind, "project"),
+          eq(pluginManagedResources.resourceKey, input.projectKey),
+        ))
+        .then((rows) => rows[0] ?? null);
+
+      if (existingBinding) {
+        const existingProject = await db
+          .select({ id: projects.id })
+          .from(projects)
+          .where(and(eq(projects.companyId, input.companyId), eq(projects.id, existingBinding.resourceId)))
+          .then((rows) => rows[0] ?? null);
+        if (existingProject) {
+          if (input.reset) {
+            await db
+              .update(projects)
+              .set({
+                name: declaration.displayName,
+                description: declaration.description ?? null,
+                status: declaration.status ?? "in_progress",
+                color: declaration.color ?? null,
+                updatedAt: new Date(),
+              })
+              .where(and(eq(projects.companyId, input.companyId), eq(projects.id, existingBinding.resourceId)));
+          }
+          if (input.createIfMissing !== false) {
+            await db
+              .update(pluginManagedResources)
+              .set({ defaultsJson: defaults, updatedAt: new Date() })
+              .where(eq(pluginManagedResources.id, existingBinding.id));
+          }
+          const project = await getProjectById(existingBinding.resourceId);
+          return {
+            pluginKey: input.pluginKey,
+            resourceKind: "project",
+            resourceKey: input.projectKey,
+            companyId: input.companyId,
+            projectId: project?.id ?? existingBinding.resourceId,
+            project: project as import("@paperclipai/shared").Project | null,
+            status: input.reset ? "reset" : "resolved",
+          };
+        }
+
+        if (input.createIfMissing === false) {
+          return {
+            pluginKey: input.pluginKey,
+            resourceKind: "project",
+            resourceKey: input.projectKey,
+            companyId: input.companyId,
+            projectId: null,
+            project: null,
+            status: "missing",
+          };
+        }
+
+        const project = await createProject(input.companyId, {
+          name: declaration.displayName,
+          description: declaration.description ?? null,
+          status: declaration.status ?? "in_progress",
+          color: declaration.color ?? undefined,
+        });
+        await db
+          .update(pluginManagedResources)
+          .set({ resourceId: project.id, defaultsJson: defaults, updatedAt: new Date() })
+          .where(eq(pluginManagedResources.id, existingBinding.id));
+        const hydrated = await getProjectById(project.id);
+        return {
+          pluginKey: input.pluginKey,
+          resourceKind: "project",
+          resourceKey: input.projectKey,
+          companyId: input.companyId,
+          projectId: hydrated?.id ?? project.id,
+          project: hydrated as import("@paperclipai/shared").Project | null,
+          status: "relinked",
+        };
+      }
+
+      if (input.createIfMissing === false) {
+        return {
+          pluginKey: input.pluginKey,
+          resourceKind: "project",
+          resourceKey: input.projectKey,
+          companyId: input.companyId,
+          projectId: null,
+          project: null,
+          status: "missing",
+        };
+      }
+
+      const project = await createProject(input.companyId, {
+        name: declaration.displayName,
+        description: declaration.description ?? null,
+        status: declaration.status ?? "in_progress",
+        color: declaration.color ?? undefined,
+      });
+      await db.insert(pluginManagedResources).values({
+        companyId: input.companyId,
+        pluginId: input.pluginId,
+        pluginKey: input.pluginKey,
+        resourceKind: "project",
+        resourceKey: input.projectKey,
+        resourceId: project.id,
+        defaultsJson: defaults,
+      });
+      const hydrated = await getProjectById(project.id);
+      return {
+        pluginKey: input.pluginKey,
+        resourceKind: "project",
+        resourceKey: input.projectKey,
+        companyId: input.companyId,
+        projectId: hydrated?.id ?? project.id,
+        project: hydrated as import("@paperclipai/shared").Project | null,
+        status: "created",
+      };
     },
+
+    createWithRepositories: async (companyId: string, data: Parameters<typeof createProject>[1], repositories: import("@paperclipai/shared").ProjectRepository[]): Promise<ProjectWithGoals> => {
+      return db.transaction(async (tx) => {
+        const service = projectService(tx as unknown as Db);
+        const project = await service.create(companyId, data);
+        for (const repo of repositories) {
+          await service.createWorkspace(project.id, { name: repo.fullName, repoUrl: repo.url, metadata: { githubRepositoryId: repo.id } });
+        }
+        return (await service.getById(project.id))!;
+      });
+    },
+
+    replaceRepositories: async (projectId: string, repositories: import("@paperclipai/shared").ProjectRepository[]): Promise<ProjectWithGoals | null> => {
+      return db.transaction(async (tx) => {
+        const [project] = await tx.select().from(projects).where(eq(projects.id, projectId)).for("update");
+        if (!project) return null;
+        const service = projectService(tx as unknown as Db);
+        const existing = await service.listWorkspaces(projectId);
+        const ids = new Set(repositories.map((repo) => repo.id));
+        for (const workspace of existing) {
+          const repoId = workspace.metadata?.githubRepositoryId;
+          if (typeof repoId === "string" && !ids.has(repoId)) {
+            // Keep local/runtime workspace configuration when detaching source.
+            if (workspace.cwd || workspace.remoteWorkspaceRef) {
+              const { githubRepositoryId: _id, ...metadata } = workspace.metadata!;
+              await service.updateWorkspace(projectId, workspace.id, { repoUrl: null, metadata });
+            } else await service.removeWorkspace(projectId, workspace.id);
+          }
+        }
+        for (const repo of repositories) {
+          const retained = existing.find((workspace) => workspace.metadata?.githubRepositoryId === repo.id);
+          if (retained) {
+            if (retained.repoUrl !== repo.url || retained.name !== repo.fullName) {
+              await service.updateWorkspace(projectId, retained.id, { name: repo.fullName, repoUrl: repo.url });
+            }
+            continue;
+          }
+          const legacy = existing.find((workspace) => !workspace.metadata?.githubRepositoryId && workspace.repoUrl?.replace(/\.git$/, "").replace(/\/$/, "").toLowerCase() === repo.url.toLowerCase());
+          if (legacy) {
+            await service.updateWorkspace(projectId, legacy.id, { metadata: { ...legacy.metadata, githubRepositoryId: repo.id } });
+          } else await service.createWorkspace(projectId, { name: repo.fullName, repoUrl: repo.url, metadata: { githubRepositoryId: repo.id } });
+        }
+        await tx.update(projects).set({ updatedAt: new Date() }).where(eq(projects.id, projectId));
+        return service.getById(projectId);
+      });
+    },
+
+    create: createProject,
 
     update: async (
       id: string,
@@ -482,6 +871,9 @@ export function projectService(db: Db) {
         .where(eq(projects.id, id))
         .then((rows) => rows[0] ?? null);
       if (!existingProject) return null;
+      if (ids && ids.length > 0) {
+        await assertGoalsBelongToCompany(db, existingProject.companyId, ids);
+      }
 
       if (projectData.name !== undefined) {
         const existingShortname = normalizeProjectUrlKey(existingProject.name);

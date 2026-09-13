@@ -34,6 +34,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const NO_COMPANY = "__none__";
+export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "finance";
+
+export interface CostsProps {
+  /** Render inside Audit without a second page-level title or breadcrumb. */
+  embedded?: boolean;
+  initialTab?: CostsMainTab;
+  /** Pin the surface to one tab (used by Audit > Budgets). */
+  lockTab?: boolean;
+  /** Budgets is a peer Audit section, so omit it from the Costs sub-navigation. */
+  hideBudgetsTab?: boolean;
+}
 
 function currentWeekRange(): { from: string; to: string } {
   const now = new Date();
@@ -80,18 +91,18 @@ function MetricTile({
   icon: ComponentType<{ className?: string }>;
 }) {
   return (
-    <div className="border border-border p-4">
+    <Card className="block p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
+          <div className="text-(length:--text-micro) uppercase tracking-(--tracking-eyebrow) text-muted-foreground">{label}</div>
           <div className="mt-2 text-2xl font-semibold tabular-nums">{value}</div>
           <div className="mt-1 text-xs leading-5 text-muted-foreground">{subtitle}</div>
         </div>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-border">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border">
           <Icon className="h-4 w-4 text-muted-foreground" />
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -146,14 +157,20 @@ function FinanceSummaryCard({
   );
 }
 
-export function Costs() {
+export function Costs({
+  embedded = false,
+  initialTab = "overview",
+  lockTab = false,
+  hideBudgetsTab = false,
+}: CostsProps = {}) {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
 
-  const [mainTab, setMainTab] = useState<"overview" | "budgets" | "providers" | "billers" | "finance">("overview");
+  const [mainTab, setMainTab] = useState<CostsMainTab>(initialTab);
   const [activeProvider, setActiveProvider] = useState("all");
   const [activeBiller, setActiveBiller] = useState("all");
+  const showSummaryChrome = !(embedded && lockTab && initialTab === "budgets");
 
   const {
     preset,
@@ -168,8 +185,12 @@ export function Costs() {
   } = useDateRange();
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Costs" }]);
-  }, [setBreadcrumbs]);
+    if (!embedded) setBreadcrumbs([{ label: "Costs" }]);
+  }, [embedded, setBreadcrumbs]);
+
+  useEffect(() => {
+    setMainTab(initialTab);
+  }, [initialTab]);
 
   const [today, setToday] = useState(() => new Date().toDateString());
   const todayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -204,7 +225,7 @@ export function Costs() {
     queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.projects.list(selectedCompanyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.projects.all(selectedCompanyId) });
   };
 
   const policyMutation = useMutation({
@@ -240,7 +261,7 @@ export function Costs() {
       ]);
       return { summary, byAgent, byProject, byAgentModel };
     },
-    enabled: !!selectedCompanyId && customReady,
+    enabled: !!selectedCompanyId && customReady && showSummaryChrome,
   });
 
   const { data: financeData, isLoading: financeLoading, error: financeError } = useQuery({
@@ -259,7 +280,7 @@ export function Costs() {
       ]);
       return { summary, byBiller, byKind, events };
     },
-    enabled: !!selectedCompanyId && customReady,
+    enabled: !!selectedCompanyId && customReady && showSummaryChrome,
   });
 
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set());
@@ -529,22 +550,26 @@ export function Costs() {
   }), [budgetPolicies]);
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={DollarSign} message="Select a company to view costs." />;
+    return <EmptyState icon={DollarSign} message="Select an organization to view costs." />;
   }
 
   const showCustomPrompt = preset === "custom" && !customReady;
   const showOverviewLoading = (spendLoading || financeLoading) && customReady;
   const overviewError = spendError ?? financeError;
-
   return (
     <div className="space-y-6">
-      <div className="space-y-5">
+      {showSummaryChrome ? (
+        <div className="space-y-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
+              {embedded ? (
+                <h2 className="text-lg font-semibold text-foreground">Costs</h2>
+              ) : (
                 <h1 className="text-3xl font-semibold tracking-tight">Costs</h1>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Inference spend, platform fees, credits, and live quota windows.
-                </p>
+              )}
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+                Inference spend, platform fees, credits, and live quota windows.
+              </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -554,6 +579,7 @@ export function Costs() {
                   variant={preset === key ? "secondary" : "ghost"}
                   size="sm"
                   onClick={() => setPreset(key)}
+                  aria-pressed={preset === key}
                 >
                   {PRESET_LABELS[key]}
                 </Button>
@@ -615,16 +641,19 @@ export function Costs() {
               icon={ArrowUpRight}
             />
           </div>
-      </div>
+        </div>
+      ) : null}
 
       <Tabs value={mainTab} onValueChange={(value) => setMainTab(value as typeof mainTab)}>
-        <TabsList variant="line" className="justify-start">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="budgets">Budgets</TabsTrigger>
-          <TabsTrigger value="providers">Providers</TabsTrigger>
-          <TabsTrigger value="billers">Billers</TabsTrigger>
-          <TabsTrigger value="finance">Finance</TabsTrigger>
-        </TabsList>
+        {!lockTab ? (
+          <TabsList variant="line" className="justify-start">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            {!hideBudgetsTab ? <TabsTrigger value="budgets">Budgets</TabsTrigger> : null}
+            <TabsTrigger value="providers">Providers</TabsTrigger>
+            <TabsTrigger value="billers">Billers</TabsTrigger>
+            <TabsTrigger value="finance">Finance</TabsTrigger>
+          </TabsList>
+        ) : null}
 
         <TabsContent value="overview" className="mt-4 space-y-4">
           {showCustomPrompt ? (
@@ -654,7 +683,7 @@ export function Costs() {
                 </div>
               ) : null}
 
-              <div className="grid gap-4 xl:grid-cols-[1.3fr,1fr]">
+              <div className="grid gap-4 xl:grid-cols-(--gtc-31)">
                 <Card>
                   <CardHeader className="px-5 pt-5 pb-2">
                     <CardTitle className="text-base">Inference ledger</CardTitle>
@@ -675,7 +704,7 @@ export function Costs() {
                         </div>
                       </div>
                       <div className="border border-border px-4 py-3 text-right">
-                        <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">usage</div>
+                        <div className="text-(length:--text-micro) uppercase tracking-(--tracking-eyebrow) text-muted-foreground">usage</div>
                         <div className="mt-1 text-lg font-medium tabular-nums">
                           {formatTokens(inferenceTokenTotal)}
                         </div>
@@ -686,12 +715,12 @@ export function Costs() {
                         <div className="h-2 overflow-hidden bg-muted">
                           <div
                             className={cn(
-                              "h-full transition-[width,background-color] duration-150",
+                              "h-full transition-(--tp-width-background-color) duration-150",
                               spendData.summary.utilizationPercent > 90
-                                ? "bg-red-400"
+                                ? "bg-(--status-task-blocked)"
                                 : spendData.summary.utilizationPercent > 70
-                                  ? "bg-yellow-400"
-                                  : "bg-emerald-400",
+                                  ? "bg-(--status-task-todo)"
+                                  : "bg-(--status-task-done)",
                             )}
                             style={{ width: `${Math.min(100, spendData.summary.utilizationPercent)}%` }}
                           />
@@ -713,7 +742,7 @@ export function Costs() {
                 />
               </div>
 
-              <div className="grid gap-4 xl:grid-cols-[1.25fr,0.95fr]">
+              <div className="grid gap-4 xl:grid-cols-(--gtc-32)">
                 <Card>
                   <CardHeader className="px-5 pt-5 pb-2">
                     <CardTitle className="text-base">By agent</CardTitle>
@@ -805,7 +834,7 @@ export function Costs() {
                   <Card>
                     <CardHeader className="px-5 pt-5 pb-2">
                       <CardTitle className="text-base">By project</CardTitle>
-                      <CardDescription>Run costs attributed through project-linked issues.</CardDescription>
+                      <CardDescription>Run costs attributed through project-linked tasks.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2 px-5 pb-5 pt-2">
                       {(spendData?.byProject.length ?? 0) === 0 ? (
@@ -838,7 +867,7 @@ export function Costs() {
             <p className="text-sm text-destructive">{(budgetError as Error).message}</p>
           ) : (
             <>
-              <Card className="border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]">
+              <Card className="border-border/70 bg-(image:--gradient-extract-2)">
                 <CardHeader className="px-5 pt-5 pb-3">
                   <CardTitle className="text-base">Budget control plane</CardTitle>
                   <CardDescription>
@@ -907,10 +936,10 @@ export function Costs() {
                   return (
                     <section key={scopeType} className="space-y-3">
                       <div>
-                        <h2 className="text-lg font-semibold capitalize">{scopeType} budgets</h2>
+                        <h2 className="text-lg font-semibold capitalize">{scopeType === "company" ? "organization" : scopeType} budgets</h2>
                         <p className="text-sm text-muted-foreground">
                           {scopeType === "company"
-                            ? "Company-wide monthly policy."
+                            ? "Organization-wide monthly policy."
                             : scopeType === "agent"
                               ? "Recurring monthly spend policies for individual agents."
                               : "Lifetime spend policies for execution-bound projects."}
@@ -939,7 +968,7 @@ export function Costs() {
                 {budgetPolicies.length === 0 ? (
                   <Card>
                     <CardContent className="px-5 py-8 text-sm text-muted-foreground">
-                      No budget policies yet. Set agent and project budgets from their detail pages, or use the existing company monthly budget control.
+                      No budget policies yet. Set agent and project budgets from their detail pages, or use the existing organization monthly budget control.
                     </CardContent>
                   </Card>
                 ) : null}
@@ -1073,7 +1102,7 @@ export function Costs() {
                 eventCount={financeData?.summary.eventCount ?? 0}
               />
 
-              <div className="grid gap-4 xl:grid-cols-[1.2fr,0.95fr]">
+              <div className="grid gap-4 xl:grid-cols-(--gtc-33)">
                 <div className="space-y-4">
                   <Card>
                     <CardHeader className="px-5 pt-5 pb-2">

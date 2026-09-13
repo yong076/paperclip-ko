@@ -1,39 +1,42 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   BookOpen,
+  Flag,
   LogOut,
-  type LucideIcon,
-  Moon,
   Settings,
+  type LucideIcon,
   UserRound,
-  Sun,
   UserRoundPen,
 } from "lucide-react";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { authApi } from "@/api/auth";
 import { queryKeys } from "@/lib/queryKeys";
+import { useCloudInstance } from "@/hooks/useCloudInstance";
+import { useSignOut } from "@/hooks/useSignOut";
 import { useSidebar } from "../context/SidebarContext";
-import { useTheme } from "../context/ThemeContext";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { cn } from "../lib/utils";
+import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
+import { ThemeToggle } from "./ThemeToggle";
+import { SidebarServerInfo } from "./SidebarServerInfo";
 
-const PROFILE_SETTINGS_PATH = "/instance/settings/profile";
+const PROFILE_SETTINGS_PATH = "/company/settings/instance/profile";
 const DOCS_URL = "https://docs.paperclip.ing/";
+const FEEDBACK_URL = "https://paperclip.ing/feedback";
 
 interface SidebarAccountMenuProps {
   deploymentMode?: DeploymentMode;
-  instanceSettingsTarget: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
-  version?: string | null;
+  /** Contextual navigation occupies a full sidebar even if the saved global nav mode is collapsed. */
+  forceExpanded?: boolean;
 }
 
 interface MenuActionProps {
   label: string;
-  description: string;
   icon: LucideIcon;
   onClick?: () => void;
   href?: string;
@@ -62,19 +65,22 @@ function deriveUserSlug(name: string | null | undefined, email: string | null | 
   return "me";
 }
 
-function MenuAction({ label, description, icon: Icon, onClick, href, external = false }: MenuActionProps) {
+function MenuAction({
+  label,
+  icon: Icon,
+  onClick,
+  href,
+  external = false,
+}: MenuActionProps) {
   const className =
-    "flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-accent/60";
+    "flex h-(--profile-popover-row-height) w-full items-center gap-(--profile-popover-row-gap) rounded-lg px-2.5 text-left text-(length:--text-compact) font-medium leading-(--profile-popover-label-line-height) text-foreground transition-colors hover:bg-accent";
 
   const content = (
     <>
-      <span className="mt-0.5 rounded-lg border border-border bg-background/70 p-2 text-muted-foreground">
+      <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
         <Icon className="size-4" />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-foreground">{label}</span>
-        <span className="block text-xs text-muted-foreground">{description}</span>
-      </span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
     </>
   );
 
@@ -103,15 +109,14 @@ function MenuAction({ label, description, icon: Icon, onClick, href, external = 
 
 export function SidebarAccountMenu({
   deploymentMode,
-  instanceSettingsTarget,
   open: controlledOpen,
   onOpenChange,
-  version,
+  forceExpanded = false,
 }: SidebarAccountMenuProps) {
+  const isCloud = Boolean(useCloudInstance());
   const [internalOpen, setInternalOpen] = useState(false);
-  const queryClient = useQueryClient();
-  const { isMobile, setSidebarOpen } = useSidebar();
-  const { theme, toggleTheme } = useTheme();
+  const { isMobile, setSidebarOpen, collapsed, peeking } = useSidebar();
+  const rail = collapsed && !peeking && !forceExpanded;
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const { data: session } = useQuery({
@@ -120,18 +125,11 @@ export function SidebarAccountMenu({
     retry: false,
   });
 
-  const signOutMutation = useMutation({
-    mutationFn: () => authApi.signOut(),
-    onSuccess: async () => {
-      setOpen(false);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
-    },
-  });
+  const signOutMutation = useSignOut({ onSignedOut: closeNavigationChrome });
 
   const displayName = session?.user.name?.trim() || "Board";
   const secondaryLabel =
     session?.user.email?.trim() || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace board");
-  const accountBadge = deploymentMode === "authenticated" ? "Account" : "Local";
   const initials = deriveInitials(displayName);
   const profileHref = `/u/${deriveUserSlug(session?.user.name, session?.user.email, session?.user.id)}`;
 
@@ -140,117 +138,117 @@ export function SidebarAccountMenu({
     if (isMobile) setSidebarOpen(false);
   }
 
+  function handleSignOut() {
+    signOutMutation.mutate();
+  }
+
   return (
-    <div className="border-t border-r border-border bg-background px-3 py-2">
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <button
-            type="button"
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent/50 hover:text-foreground"
-            aria-label="Open account menu"
+    <div className="bg-border/50 px-3 py-2 dark:bg-muted">
+      <div className={cn("flex items-center gap-0.5", !rail && "px-2")}>
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className={cn(
+                "flex min-w-0 items-center gap-2.5 rounded-lg text-left text-(length:--text-compact) font-medium text-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                rail ? "w-full px-3 py-2" : "flex-1 px-2 py-1.5",
+              )}
+              aria-label="Open account menu"
+            >
+              <Avatar size="sm">
+                {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
+                <AvatarFallback>{initials}</AvatarFallback>
+              </Avatar>
+              <span className={cn("min-w-0 flex-1 truncate", rail && SIDEBAR_RAIL_HIDDEN_LABEL)}>{displayName}</span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="start"
+            sideOffset={10}
+            className="min-h-(--profile-popover-min-height) w-(--profile-popover-width) max-w-(--sz-calc-24) overflow-hidden rounded-xl border-border bg-popover p-0 shadow-(--shadow-profile-popover)"
           >
-            <Avatar size="sm">
-              {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
-              <AvatarFallback>{initials}</AvatarFallback>
-            </Avatar>
-            <span className="min-w-0 flex-1 truncate">{displayName}</span>
-          </button>
-        </PopoverTrigger>
-        <PopoverContent
-          side="top"
-          align="start"
-          sideOffset={10}
-          className="w-[var(--radix-popover-trigger-width)] overflow-hidden rounded-t-2xl rounded-b-none border-border p-0 shadow-2xl"
-        >
-          <div className="h-24 bg-[linear-gradient(135deg,hsl(var(--primary))_0%,hsl(var(--accent))_55%,hsl(var(--muted))_100%)]" />
-          <div className="-mt-8 px-4 pb-4">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl border-4 border-popover bg-popover p-0.5 shadow-sm">
-                <Avatar size="lg">
-                  {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
-                  <AvatarFallback>{initials}</AvatarFallback>
-                </Avatar>
-              </div>
-              <div className="min-w-0 flex-1 pt-1">
-                <div className="flex items-center gap-2">
-                  <h2 className="truncate text-base font-semibold text-foreground">{displayName}</h2>
-                  <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    {accountBadge}
-                  </span>
-                </div>
-                <p className="truncate text-sm text-muted-foreground">{secondaryLabel}</p>
-                {version ? (
-                  <p className="mt-1 text-xs text-muted-foreground">Paperclip v{version}</p>
-                ) : null}
+            <div className="flex h-(--profile-popover-header-height) shrink-0 items-center gap-2.5 px-3.5">
+              <Avatar className="size-9">
+                {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
+                <AvatarFallback className="text-xs text-foreground">{initials}</AvatarFallback>
+              </Avatar>
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-sm font-semibold leading-(--profile-popover-label-line-height) text-foreground">
+                  {displayName}
+                </h2>
+                <p className="truncate text-(length:--text-micro) leading-(--profile-popover-meta-line-height) text-muted-foreground">
+                  {secondaryLabel}
+                </p>
               </div>
             </div>
 
-            <div className="mt-4 space-y-1">
+            <div className="flex flex-1 flex-col gap-0.5 border-t border-border px-2.5 pb-2.5 pt-2">
+              <MenuAction
+                label="Settings"
+                icon={Settings}
+                href="/company/settings"
+                onClick={closeNavigationChrome}
+              />
               <MenuAction
                 label="View profile"
-                description="Open your activity, task, and usage ledger."
                 icon={UserRound}
                 href={profileHref}
                 onClick={closeNavigationChrome}
               />
               <MenuAction
                 label="Edit profile"
-                description="Update your display name and avatar."
                 icon={UserRoundPen}
                 href={PROFILE_SETTINGS_PATH}
                 onClick={closeNavigationChrome}
               />
               <MenuAction
-                label="Instance settings"
-                description="Jump back to the last settings page you opened."
-                icon={Settings}
-                href={instanceSettingsTarget}
-                onClick={closeNavigationChrome}
-              />
-              <MenuAction
                 label="Documentation"
-                description="Open Paperclip docs in a new tab."
                 icon={BookOpen}
                 href={DOCS_URL}
                 external
                 onClick={() => setOpen(false)}
               />
-              <MenuAction
-                label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-                description="Toggle the app appearance."
-                icon={theme === "dark" ? Sun : Moon}
-                onClick={() => {
-                  toggleTheme();
-                  setOpen(false);
-                }}
-              />
+              <ThemeToggle variant="compact-menu-action" onAfterToggle={() => setOpen(false)} />
               {deploymentMode === "authenticated" ? (
                 <button
                   type="button"
                   className={cn(
-                    "flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-destructive/10",
+                    "flex h-(--profile-popover-row-height) w-full items-center gap-(--profile-popover-row-gap) rounded-lg px-2.5 text-left text-(length:--text-compact) font-medium leading-(--profile-popover-label-line-height) text-foreground transition-colors hover:bg-destructive/10",
                     signOutMutation.isPending && "cursor-not-allowed opacity-60",
                   )}
-                  onClick={() => signOutMutation.mutate()}
+                  onClick={handleSignOut}
                   disabled={signOutMutation.isPending}
                 >
-                  <span className="mt-0.5 rounded-lg border border-border bg-background/70 p-2 text-muted-foreground">
+                  <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
                     <LogOut className="size-4" />
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-foreground">
-                      {signOutMutation.isPending ? "Signing out..." : "Sign out"}
-                    </span>
-                    <span className="block text-xs text-muted-foreground">
-                      End this browser session.
-                    </span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {signOutMutation.isPending ? "Signing out..." : "Sign out"}
                   </span>
                 </button>
               ) : null}
+              <SidebarServerInfo />
             </div>
-          </div>
-        </PopoverContent>
-      </Popover>
+          </PopoverContent>
+        </Popover>
+        {!rail && !isCloud ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <a
+                href={FEEDBACK_URL}
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Share feedback"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Flag className="h-4 w-4" aria-hidden="true" />
+              </a>
+            </TooltipTrigger>
+            <TooltipContent side="top">Share feedback</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -10,7 +10,7 @@ Paperclip instance setup과 diagnostics 명령입니다.
 ## `paperclipai run`
 
 ```sh
-pnpm paperclipai run
+./scripts/paperclip-ko run
 ```
 
 한 번에 다음을 수행합니다.
@@ -22,13 +22,13 @@ pnpm paperclipai run
 특정 instance:
 
 ```sh
-pnpm paperclipai run --instance dev
+./scripts/paperclip-ko run --instance dev
 ```
 
 ## `paperclipai onboard`
 
 ```sh
-pnpm paperclipai onboard
+./scripts/paperclip-ko onboard
 ```
 
 첫 설치용 interactive setup입니다. 기존 config가 있으면 보존하며, 설정 변경은 `paperclipai configure`를 사용합니다.
@@ -36,20 +36,20 @@ pnpm paperclipai onboard
 빠른 시작:
 
 ```sh
-pnpm paperclipai onboard --yes
+./scripts/paperclip-ko onboard --yes
 ```
 
 설정 후 바로 실행:
 
 ```sh
-pnpm paperclipai onboard --run
+./scripts/paperclip-ko onboard --run
 ```
 
 ## `paperclipai doctor`
 
 ```sh
-pnpm paperclipai doctor
-pnpm paperclipai doctor --repair
+./scripts/paperclip-ko doctor
+./scripts/paperclip-ko doctor --repair
 ```
 
 server configuration, database, secrets, storage, missing key file을 검사하고 필요하면 repair합니다.
@@ -57,15 +57,15 @@ server configuration, database, secrets, storage, missing key file을 검사하�
 ## `paperclipai configure`
 
 ```sh
-pnpm paperclipai configure --section server
-pnpm paperclipai configure --section secrets
-pnpm paperclipai configure --section storage
+./scripts/paperclip-ko configure --section server
+./scripts/paperclip-ko configure --section secrets
+./scripts/paperclip-ko configure --section storage
 ```
 
 ## `paperclipai env`
 
 ```sh
-pnpm paperclipai env
+./scripts/paperclip-ko env
 ```
 
 resolved environment configuration을 보여줍니다. `PAPERCLIP_BIND`, `PAPERCLIP_BIND_HOST` 같은 bind 설정도 포함됩니다.
@@ -73,7 +73,7 @@ resolved environment configuration을 보여줍니다. `PAPERCLIP_BIND`, `PAPERC
 ## `paperclipai allowed-hostname`
 
 ```sh
-pnpm paperclipai allowed-hostname my-tailscale-host
+./scripts/paperclip-ko allowed-hostname my-tailscale-host
 ```
 
 authenticated/private mode에서 private hostname을 allowlist에 추가합니다.
@@ -91,5 +91,5 @@ authenticated/private mode에서 private hostname을 allowlist에 추가합니�
 환경 변수로 override:
 
 ```sh
-PAPERCLIP_HOME=/custom/home PAPERCLIP_INSTANCE_ID=dev pnpm paperclipai run
+PAPERCLIP_HOME=/custom/home PAPERCLIP_INSTANCE_ID=dev ./scripts/paperclip-ko run
 ```

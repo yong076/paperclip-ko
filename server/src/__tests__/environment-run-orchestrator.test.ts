@@ -10,6 +10,7 @@ const mockBuildWorkspaceRealizationRequest = vi.hoisted(() => vi.fn());
 const mockUpdateLeaseMetadata = vi.hoisted(() => vi.fn());
 const mockUpdateExecutionWorkspace = vi.hoisted(() => vi.fn());
 const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockLoggerInfo = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/environment-execution-target.js", () => ({
   resolveEnvironmentExecutionTarget: mockResolveEnvironmentExecutionTarget,
@@ -42,6 +43,15 @@ vi.mock("../services/execution-workspaces.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: mockLogActivity,
+}));
+
+vi.mock("../middleware/logger.js", () => ({
+  logger: {
+    info: mockLoggerInfo,
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
 }));
 
 // ---------------------------------------------------------------------------
@@ -186,6 +196,10 @@ function makeMockRuntime(overrides: Partial<EnvironmentRuntimeService> = {}): En
       metadata: {
         workspaceRealization: {
           version: 1,
+          mode: "copy",
+          authoritativeRoot: "/workspace/project",
+          pathAliases: [],
+          outboundRestorePaths: [],
           driver: "local",
           cwd: "/workspace/project",
         },
@@ -241,6 +255,20 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     mockLogActivity.mockResolvedValue(undefined);
   });
 
+  it.each([false, true])("only requests active-work cancellation for explicit Stop: %s", async (cancelActiveWork) => {
+    const releaseRunLeases = vi.fn().mockResolvedValue([]);
+    const runtime = makeMockRuntime({ releaseRunLeases });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+    await orchestrator.releaseForRun({
+      heartbeatRunId: "run-1", companyId: "company-1", agentId: "agent-1",
+      providerResourceDisposition: "stop_and_retain", cancelActiveWork,
+    });
+    expect(releaseRunLeases).toHaveBeenCalledWith(
+      "run-1", "released", expect.any(Function), "stop_and_retain",
+      ...(cancelActiveWork ? [true] : []),
+    );
+  });
+
   it("happy path: returns lease, executionTarget, and remoteExecution on successful realization", async () => {
     const executionTarget = { kind: "local", environmentId: "env-1", leaseId: "lease-1" };
     const remoteExecution = { kind: "local", environmentId: "env-1", leaseId: "lease-1" };
@@ -254,7 +282,15 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     const result = await orchestrator.realizeForRun(makeRealizeInput());
 
     expect(result.lease).toBeDefined();
-    expect(result.executionTarget).toEqual(executionTarget);
+    expect(result.executionTarget).toEqual({
+      ...executionTarget,
+      workspaceRealization: {
+        mode: "copy",
+        authoritativeRoot: "/workspace/project",
+        pathAliases: [],
+        outboundRestorePaths: [],
+      },
+    });
     expect(result.remoteExecution).toEqual(remoteExecution);
     expect(result.workspaceRealization).toEqual(
       expect.objectContaining({ version: 1, driver: "local" }),
@@ -262,6 +298,45 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
 
     expect(runtime.realizeWorkspace).toHaveBeenCalledOnce();
     expect(mockResolveEnvironmentExecutionTarget).toHaveBeenCalledOnce();
+  });
+
+  it("uses an in-place authoritative root on the adapter execution target", async () => {
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/copied/workspace",
+    });
+    const runtime = makeMockRuntime({
+      realizeWorkspace: vi.fn().mockResolvedValue({
+        cwd: "/app",
+        metadata: {
+          workspaceRealization: {
+            version: 1,
+            mode: "in_place",
+            authoritativeRoot: "/app",
+            pathAliases: [],
+            outboundRestorePaths: [],
+          },
+        },
+      }),
+    });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    const result = await orchestrator.realizeForRun(
+      makeRealizeInput({ environment: makeEnvironment("sandbox") }),
+    );
+
+    expect(result.executionTarget).toEqual(expect.objectContaining({
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/app",
+      workspaceRealization: {
+        mode: "in_place",
+        authoritativeRoot: "/app",
+        pathAliases: [],
+        outboundRestorePaths: [],
+      },
+    }));
   });
 
   it("realization failure: runtime.realizeWorkspace throws → EnvironmentRunError with code workspace_realization_failed", async () => {
@@ -382,6 +457,84 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     });
     mockResolveEnvironmentExecutionTarget.mockResolvedValue({
       kind: "remote",
+      transport: "ssh",
+      remoteCwd: "/remote/workspace",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "ssh-user",
+        remoteCwd: "/remote/workspace",
+        remoteWorkspacePath: "/remote/workspace",
+        privateKey: null,
+        knownHosts: null,
+        strictHostKeyChecking: true,
+      },
+    });
+
+    const runtime = makeMockRuntime({
+      realizeWorkspace: vi.fn().mockResolvedValue({
+        cwd: "/remote/workspace",
+        metadata: {
+          workspaceRealization: {
+            version: 1,
+            transport: "ssh",
+            remote: { path: "/remote/workspace" },
+          },
+        },
+      }),
+    });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    await orchestrator.realizeForRun(makeRealizeInput({
+      environment: makeEnvironment("ssh"),
+    }));
+
+    // The `ssh` driver runs the command on the remote host that shares the
+    // workspace path, so the configured provision command still runs there.
+    expect(runtime.execute).toHaveBeenCalledOnce();
+    expect(runtime.execute).toHaveBeenCalledWith(expect.objectContaining({
+      environment: expect.objectContaining({ driver: "ssh" }),
+      lease: expect.objectContaining({ id: "lease-1" }),
+      command: "bash",
+      args: ["-lc", "npm install -g @anthropic-ai/claude-code"],
+      cwd: "/remote/workspace",
+      env: {
+        SHELL: "/bin/bash",
+      },
+    }));
+    // The sandbox skip log is specific to the sandbox driver; ssh stays quiet.
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
+  });
+
+  it("skips the host provision command for a sandbox environment and logs the skip", async () => {
+    mockBuildWorkspaceRealizationRequest.mockReturnValue({
+      version: 1,
+      adapterType: "claude_local",
+      companyId: "company-1",
+      environmentId: "env-1",
+      executionWorkspaceId: null,
+      issueId: null,
+      heartbeatRunId: "run-1",
+      requestedMode: null,
+      source: {
+        kind: "project_primary",
+        localPath: "/workspace/project",
+        projectId: null,
+        projectWorkspaceId: null,
+        repoUrl: null,
+        repoRef: null,
+        strategy: "project_primary",
+        branchName: null,
+        worktreePath: null,
+      },
+      runtimeOverlay: {
+        provisionCommand: "npm install -g @anthropic-ai/claude-code",
+      },
+    });
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
       transport: "sandbox",
       providerKey: "e2b",
       remoteCwd: "/remote/workspace",
@@ -407,17 +560,138 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
       environment: makeEnvironment("sandbox"),
     }));
 
-    expect(runtime.execute).toHaveBeenCalledOnce();
-    expect(runtime.execute).toHaveBeenCalledWith(expect.objectContaining({
-      environment: expect.objectContaining({ driver: "sandbox" }),
-      lease: expect.objectContaining({ id: "lease-1" }),
-      command: "bash",
-      args: ["-lc", "npm install -g @anthropic-ai/claude-code"],
-      cwd: "/remote/workspace",
-      env: {
-        SHELL: "/bin/bash",
+    // The sandbox receives the provisioned tree through the adapter stage.sync
+    // step, so the orchestrator must not run the host command in the sandbox.
+    expect(runtime.execute).not.toHaveBeenCalled();
+    // The skip is observable: exactly one log line records it with the driver.
+    expect(mockLoggerInfo).toHaveBeenCalledOnce();
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ driver: "sandbox", environmentId: "env-1" }),
+      expect.stringContaining("Skip host provisionCommand"),
+    );
+  });
+
+  it("does not rerun the provision command during local environment realization", async () => {
+    mockBuildWorkspaceRealizationRequest.mockReturnValue({
+      version: 1,
+      adapterType: "claude_local",
+      companyId: "company-1",
+      environmentId: "env-1",
+      executionWorkspaceId: null,
+      issueId: null,
+      heartbeatRunId: "run-1",
+      requestedMode: null,
+      source: {
+        kind: "project_primary",
+        localPath: "/workspace/project",
+        projectId: null,
+        projectWorkspaceId: null,
+        repoUrl: null,
+        repoRef: null,
+        strategy: "project_primary",
+        branchName: null,
+        worktreePath: null,
       },
+      runtimeOverlay: {
+        provisionCommand: "npm install -g @anthropic-ai/claude-code",
+      },
+    });
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "local",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+    });
+
+    const runtime = makeMockRuntime();
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    await orchestrator.realizeForRun(makeRealizeInput({
+      environment: makeEnvironment("local"),
     }));
+
+    // Local workspace provisioning already ran the command before realizeForRun.
+    expect(runtime.execute).not.toHaveBeenCalled();
+    // The sandbox skip log is specific to the sandbox driver; local stays quiet.
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
+  });
+
+  it("runs project-level provision commands for ssh environments", async () => {
+    mockBuildWorkspaceRealizationRequest.mockReturnValue({
+      version: 1,
+      adapterType: "gemini_local",
+      companyId: "company-1",
+      environmentId: "env-1",
+      executionWorkspaceId: null,
+      issueId: null,
+      heartbeatRunId: "run-1",
+      requestedMode: null,
+      source: {
+        kind: "project_primary",
+        localPath: "/workspace/project",
+        projectId: null,
+        projectWorkspaceId: null,
+        repoUrl: null,
+        repoRef: null,
+        strategy: "project_primary",
+        branchName: null,
+        worktreePath: null,
+      },
+      runtimeOverlay: {
+        provisionCommand: "npm install -g @google/gemini-cli",
+      },
+    });
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "ssh",
+      remoteCwd: "/remote/workspace",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "ssh-user",
+        remoteCwd: "/remote/workspace",
+        remoteWorkspacePath: "/remote/workspace",
+        privateKey: null,
+        knownHosts: null,
+        strictHostKeyChecking: true,
+      },
+    });
+
+    const runtime = makeMockRuntime({
+      realizeWorkspace: vi.fn().mockResolvedValue({
+        cwd: "/remote/workspace",
+        metadata: {
+          workspaceRealization: {
+            version: 1,
+            transport: "ssh",
+            remote: { path: "/remote/workspace" },
+          },
+        },
+      }),
+    });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    await orchestrator.realizeForRun(makeRealizeInput({
+      environment: makeEnvironment("ssh"),
+      lease: makeLease({
+        provider: "ssh",
+        metadata: {
+          driver: "ssh",
+          remoteCwd: "/remote/workspace",
+          remoteWorkspacePath: "/remote/workspace",
+          host: "ssh.example.test",
+          port: 22,
+          username: "ssh-user",
+        },
+      }),
+    }));
+
+    expect(runtime.execute).toHaveBeenCalledWith(expect.objectContaining({
+      command: "bash",
+      args: ["-lc", "npm install -g @google/gemini-cli"],
+    }));
+    expect(mockResolveEnvironmentExecutionTarget).toHaveBeenCalledOnce();
   });
 
   it("surfaces remote provision command failures before resolving the adapter target", async () => {
@@ -458,7 +732,7 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
 
     await expect(orchestrator.realizeForRun(makeRealizeInput({
-      environment: makeEnvironment("sandbox"),
+      environment: makeEnvironment("ssh"),
     }))).rejects.toSatisfy(
       (err: unknown) =>
         err instanceof EnvironmentRunError &&

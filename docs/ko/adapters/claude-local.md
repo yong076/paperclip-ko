@@ -50,7 +50,7 @@ adapter는 Paperclip skills를 symlink한 temp directory를 만들고 `--add-dir
 수동 CLI로 agent처럼 실행하려면:
 
 ```sh
-pnpm paperclipai agent local-cli claudecoder --company-id <company-id>
+./scripts/paperclip-ko agent local-cli claudecoder --company-id <company-id>
 ```
 
 ## Environment test

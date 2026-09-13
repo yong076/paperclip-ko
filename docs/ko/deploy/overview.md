@@ -45,11 +45,11 @@ Paperclip은 로컬 실험부터 인터넷 공개 운영까지 세 가지 배포
 onboarding 중 설정할 수 있습니다.
 
 ```sh
-pnpm paperclipai onboard
+./scripts/paperclip-ko onboard
 ```
 
 나중에 변경하려면:
 
 ```sh
-pnpm paperclipai configure --section server
+./scripts/paperclip-ko configure --section server
 ```
