@@ -35,6 +35,16 @@ Existing tiers already in index.css (~80+ tokens) — extraction maps to these o
 7. **Words are part of the system.** One name per concept across the entire UI — the canonical term is *task* (never *issue* or *ticket* in copy, labels, or empty states). Buttons name the action ("Approve hire," not "Submit"). Errors say what happened and what to do. Empty states say what to do first. **Note:** enforcing the task rename is a visible change and is explicitly OUT of the zero-visual-change extraction run; it happens in its own follow-up run.
 8. **Agent-modifiable by design.** The system must be changeable via instructions: single token source, lint rules that enforce it, and this document kept current. A correct change should be expressible as "edit tokens + run checks," not "visit 40 files."
 
+## Contextual feedback
+
+Do not show a toast for task or run state already visible on the current screen.
+This includes descendant runs represented by the open subtree. Show local action
+results in place; keep failures actionable inline. Notifications for other work
+remain useful. Expected cancellation is neutral gray, not an error. The composer's Stop action stops the current response and leaves the composer available for a new message. Pause work is a separate explicit task or subtree action. A paused task replaces the composer with an amber takeover. It says “Task is
+paused.” and “Resume this task to send a message.” with a “Resume task” action.
+Subtrees use “Subtree is paused.” and “Resume subtree.” The takeover cannot be
+dismissed, retains drafts, and hides message inputs until the pause is released.
+
 ## Enforcement (what "compliant" means for the extraction run)
 
 - **Zero visual change is proven, not promised:** Storybook visual snapshots are baselined before any refactor, and all snapshots match baseline after it. A change that alters rendered output must be intentional and human-approved.
@@ -56,3 +66,29 @@ No visual redesign, no new colors or typefaces, no layout restructuring, no new 
 See `doc/design/PRIOR-ART.md` — a previous audit pass (PAP-280/283/284, on the `PAP-282-playground` branch, NOT on master) found that of ~220 hardcoded drift sites, only 6 were exact-value-mappable to existing tokens; expect the verbatim extraction to mint many new tokens that the human scale-collapse step later merges. It also drafted usage rules (radius tiers, CTA tiers, named type styles) that are good candidates for the post-audit scale decision.
 
 How-to guide for day-to-day UI changes: see `doc/design/CHANGING-THE-UI.md`.
+
+## Motion tokens (Task Chat Redesign)
+
+The redesigned task thread (flag `enableTaskChatRedesign`) is the first surface to
+tokenize motion. Principles — reasoning only; values live in `ui/src/index.css`:
+
+- **One home, and it is `:root`, not `@theme inline`.** `@theme inline` bakes literals
+  at build time, so a value placed there cannot be moved at runtime. The dev tweak panel
+  tunes motion by writing CSS custom properties live, so every motion token must resolve
+  at runtime — hence `:root`.
+- **Two tiers.** Primitives (`--motion-duration-*`, `--motion-ease-*`) express the app's
+  baseline motion feel; state/component-scoped tokens (`--motion-<state>-*`) reference the
+  primitives so the whole thread retunes from a few knobs. Scoped tokens exist so the
+  tweak panel can group controls by the state they affect.
+- **Reuse the house curves.** New easing defaults point at the two curves already used
+  across the app rather than inventing a third feel.
+- **No hardcoded timing in components.** Durations, easings, delays, and staggers used by
+  the redesigned thread must reference these tokens; a check script rejects raw `ms` /
+  `cubic-bezier` values outside `ui/src/index.css`. This discipline is what makes the
+  tweak panel structurally possible.
+- **Values are placeholders.** The committed numbers are sensible starting points, tuned
+  live by a human and pasted back from the tweak panel's export — never treated as final
+  during the baseline build.
+- **Reduced motion is honored at the token layer.** A `prefers-reduced-motion: reduce`
+  block collapses the duration/stagger tokens to zero, cascading to every scoped token,
+  in addition to each animation's own component-level guard.

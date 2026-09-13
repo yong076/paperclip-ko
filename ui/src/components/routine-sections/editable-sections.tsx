@@ -4,7 +4,6 @@ import {
   Braces,
   Clock3,
   Edit3,
-  KeyRound,
   Play,
   Plus,
   X,
@@ -68,6 +67,33 @@ const catchUpPolicyOptions = [
   },
 ];
 
+const activityGatePolicyOptions = [
+  {
+    value: "always",
+    title: "Run on every scheduled tick",
+    description: "Fire on the schedule no matter what — the default behavior.",
+  },
+  {
+    value: "require_external_activity",
+    title: "Skip when there's been no activity since the last run",
+    description:
+      "On a scheduled tick, only run if something happened since the last run that finished. Lets a watcher-style routine stay asleep while the system is settled instead of burning tokens.",
+  },
+];
+
+const activityGateScopeOptions = [
+  {
+    value: "company",
+    title: "Organization-wide",
+    description: "Any activity across the organization counts as a reason to run.",
+  },
+  {
+    value: "project",
+    title: "This project",
+    description: "Only activity in the routine's project counts as a reason to run.",
+  },
+];
+
 const triggerKinds = ["schedule", "webhook"];
 const signingModes = ["bearer", "hmac_sha256", "github_hmac", "none"];
 const signingModeDescriptions: Record<string, string> = {
@@ -117,7 +143,6 @@ export function OverviewSection({
       .sort((a, b) => a.getTime() - b.getTime())[0];
     return upcoming ? upcoming.toLocaleString() : null;
   }, [routine.triggers]);
-  const boundSecrets = editDraft.env ? Object.keys(editDraft.env).length : 0;
   const lastRun = (routineRuns ?? [])[0] ?? null;
   const recentActivity = (activity ?? []).slice(0, 5);
 
@@ -293,7 +318,7 @@ export function OverviewSection({
       </div>
 
       {/* Summary cards */}
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2">
         <SummaryCard
           icon={Clock3}
           label="Triggers"
@@ -301,14 +326,6 @@ export function OverviewSection({
           hint={nextFire ? `Next fire ${nextFire}` : "No schedule"}
           to={() => navigateToSection("triggers")}
           ariaLabel={`${activeTriggers} triggers. Open triggers.`}
-        />
-        <SummaryCard
-          icon={KeyRound}
-          label="Secrets"
-          value={boundSecrets === 0 ? "None" : `${boundSecrets} bound`}
-          hint="Manage bound secrets"
-          to={() => navigateToSection("secrets")}
-          ariaLabel={`${boundSecrets} secrets bound. Open secrets.`}
         />
         <SummaryCard
           icon={Play}
@@ -664,6 +681,13 @@ export function DeliverySection() {
   const ctx = useRoutineDetail();
   const { editDraft, setEditDraft, routine } = ctx;
 
+  // The activity gate only affects schedule ticks (webhook/manual/API fires are
+  // themselves activity and always run), so the control is only meaningful for
+  // routines that have a schedule trigger. Disable — rather than hide — it
+  // elsewhere so the capability stays discoverable.
+  const hasScheduleTrigger = routine.triggers.some((trigger) => trigger.kind === "schedule");
+  const gateEnabled = editDraft.activityGatePolicy === "require_external_activity";
+
   return (
     <div className="space-y-6">
       <div className="space-y-3">
@@ -691,6 +715,38 @@ export function DeliverySection() {
           }
           options={catchUpPolicyOptions}
         />
+      </div>
+      <div className="space-y-3">
+        <p className="text-xs font-medium uppercase tracking-(--tracking-caps) text-muted-foreground">
+          Advanced run policy
+        </p>
+        <RadioCardGroup
+          ariaLabel="Advanced run policy"
+          value={editDraft.activityGatePolicy}
+          onValueChange={(activityGatePolicy) =>
+            setEditDraft((current) => ({ ...current, activityGatePolicy }))
+          }
+          options={activityGatePolicyOptions}
+          disabled={!hasScheduleTrigger}
+        />
+        {!hasScheduleTrigger ? (
+          <p className="text-xs text-muted-foreground">
+            Add a schedule trigger to gate runs on activity. Webhook, manual, and API fires always
+            run.
+          </p>
+        ) : gateEnabled ? (
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <Label className="text-xs font-medium">Activity scope</Label>
+            <RadioCardGroup
+              ariaLabel="Activity gate scope"
+              value={editDraft.activityGateScope}
+              onValueChange={(activityGateScope) =>
+                setEditDraft((current) => ({ ...current, activityGateScope }))
+              }
+              options={activityGateScopeOptions}
+            />
+          </div>
+        ) : null}
       </div>
       <NextFiresPreview
         triggers={routine.triggers}

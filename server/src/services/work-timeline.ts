@@ -11,7 +11,7 @@ import {
   issues,
   issueThreadInteractions,
 } from "@paperclipai/db";
-import { visibleIssueCondition } from "./issue-visibility.js";
+import { executionIssueCondition } from "./issue-visibility.js";
 
 // DTO types are shared with the UI via @paperclipai/shared so both sides consume
 // one contract. Re-exported here for back-compat with existing server imports.
@@ -206,7 +206,7 @@ export function workTimelineService(db: Db) {
 
     const filterConditions = [
       eq(issues.companyId, input.companyId),
-      visibleIssueCondition(),
+      executionIssueCondition(),
       input.goalId ? eq(issues.goalId, input.goalId) : undefined,
       input.projectId ? eq(issues.projectId, input.projectId) : undefined,
       input.issueId ? eq(issues.id, input.issueId) : undefined,
@@ -332,7 +332,7 @@ export function workTimelineService(db: Db) {
       .where(
         and(
           eq(issues.companyId, input.companyId),
-          visibleIssueCondition(),
+          executionIssueCondition(),
           inArray(issues.id, issueIds),
           input.goalId ? eq(issues.goalId, input.goalId) : undefined,
           input.projectId ? eq(issues.projectId, input.projectId) : undefined,
@@ -471,8 +471,8 @@ export function workTimelineService(db: Db) {
     const accessibleIssues = await filterReadableIssues(userScopedIssues, input.canReadIssue);
     const sortedIssues = accessibleIssues.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
     const pagedIssues = sortedIssues.slice(offset, offset + limit);
-    const issueById = new Map(pagedIssues.map((issue) => [issue.id, issue]));
-    const readableIssueIds = Array.from(issueById.keys());
+    const issueById = new Map(sortedIssues.map((issue) => [issue.id, issue]));
+    const readableIssueIds = pagedIssues.map((issue) => issue.id);
 
     if (readableIssueIds.length === 0) {
       return {
