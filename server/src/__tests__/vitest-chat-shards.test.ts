@@ -13,7 +13,8 @@ it("runs every active nested/parameterized fixture case exactly once through the
     const tests = path.join(root, "server/src/__tests__");
     mkdirSync(tests, { recursive: true });
     symlinkSync(path.join(repoRoot, "node_modules"), path.join(root, "node_modules"), "junction");
-    writeFileSync(path.join(root, "package.json"), JSON.stringify({ private: true }));
+    const { packageManager } = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ private: true, packageManager }));
     writeFileSync(path.join(root, "vitest.config.mjs"), `export default {
       test: { projects: [{ test: { name: "@paperclipai/server", root: ${JSON.stringify(path.join(root, "server"))},
         include: ["src/**/*.test.ts"], pool: "forks", maxWorkers: 1 } }] }

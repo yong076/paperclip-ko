@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run the Korean source CLI without re-interpreting its arguments through pnpm.
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$script_dir/../cli/node_modules/tsx/dist/cli.mjs" "$script_dir/../cli/src/index.ts" "$@"

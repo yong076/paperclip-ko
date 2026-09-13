@@ -1,14 +1,27 @@
 # Korean fork upstream update and synchronization
 
-Target: upstream master `c9e3bb7ca40160b2ff80958ec1a8c0254638ad42`.
+Target: upstream master `f2c5e54dcad1ea00ce091cd9ef1d8a56499edef1`.
 Starting local master: `0a51ba53d989347f93239f2b3684fc09e0387b8d`.
 Starting origin master: `8749127bc0dd78512b1b108576fd3a7f1fa21d3e`.
 
-The local checkout was missing 1,175 upstream commits; origin was missing 2,012.
+The local checkout was missing 1,177 upstream commits; origin was missing 2,014.
 A normal merge preserves the Korean fork history and the previous local fixes.
 Linux sandbox test gating and source-only Vitest collection now use upstream's
 equivalent implementations. The onboarding launcher retains Korean copy while
 using upstream's current agent step and cloud creation rules.
+
+Korean CLI guidance uses `./scripts/paperclip-ko`, which passes arguments directly
+to the source CLI. Content arguments must not go through the `pnpm paperclipai`
+package script because pnpm can evaluate shell syntax again. The nested Vitest
+fixture inherits the repository's package-manager version so Corepack does not
+select an unrelated default version for the temporary project.
+
+The upstream runtime skill cache also needed a macOS fix: moving a read-only
+directory returns `EACCES` on this host. Publication now temporarily adds owner
+write permission to the directory inode, keeps its files read-only, and restores
+the original mode after success or failure. Cache and company-skill integration
+tests pass on macOS (83 tests), including concurrent callers, corruption repair,
+and permission restoration after a failed move.
 
 ## Verification and upgrade requirements
 

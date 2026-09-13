@@ -72,5 +72,5 @@ PAPERCLIP_COOKIE="your_session_cookie=..." pnpm smoke:openclaw-join
 - Paperclip이 hostname을 거절하면 host에서 허용합니다.
 
 ```sh
-pnpm paperclipai allowed-hostname host.docker.internal
+./scripts/paperclip-ko allowed-hostname host.docker.internal
 ```

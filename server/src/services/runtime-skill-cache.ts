@@ -170,6 +170,22 @@ async function removeTree(directory: string): Promise<void> {
   await fs.rm(directory, { recursive: true, force: true });
 }
 
+async function renameCacheDirectory(source: string, target: string): Promise<void> {
+  // macOS requires owner write permission on the directory being moved.
+  // Its contents stay read-only, and the open handle restores the same inode's
+  // permissions even after a successful rename. Never follow a symlink here.
+  if (process.platform !== "darwin" || !(await fs.lstat(source)).isDirectory()) {
+    return fs.rename(source, target);
+  }
+  const handle = await fs.open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const mode = (await handle.stat()).mode & 0o7777;
+    await handle.chmod(mode | 0o200);
+    try { await fs.rename(source, target); }
+    finally { await handle.chmod(mode); }
+  } finally { await handle.close(); }
+}
+
 export async function resolveRuntimeSkillCache(
   spec: CacheSpec, read: (relativePath: string) => Promise<string>, materialize = true,
   stillInstalled: () => Promise<boolean> = async () => true,
@@ -202,9 +218,9 @@ export async function resolveRuntimeSkillCache(
         if (!await matches(spec, staging)) throw new Error("Runtime skill cache validation failed");
         // Lifecycle mutations can update the DB while this builder owns the filesystem lock.
         if (!await stillInstalled()) throw new Error("Skill was renamed or removed during preparation");
-        await fs.rename(spec.entry, path.join(spec.root, `.invalid-${spec.fingerprint}-${randomUUID()}`))
+        await renameCacheDirectory(spec.entry, path.join(spec.root, `.invalid-${spec.fingerprint}-${randomUUID()}`))
           .catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-        await fs.rename(staging, spec.entry);
+        await renameCacheDirectory(staging, spec.entry);
         return path.join(spec.entry, "files");
       } finally { await removeTree(staging); }
     });

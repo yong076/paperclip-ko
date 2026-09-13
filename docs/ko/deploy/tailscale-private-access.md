@@ -42,7 +42,7 @@ http://<tailscale-host-or-ip>:3100
 ## 4. Custom private hostname 허용
 
 ```sh
-pnpm paperclipai allowed-hostname my-macbook.tailnet.ts.net
+./scripts/paperclip-ko allowed-hostname my-macbook.tailnet.ts.net
 ```
 
 ## 5. Reachability 확인

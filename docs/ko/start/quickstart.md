@@ -14,7 +14,7 @@ git clone https://github.com/yong076/paperclip-ko.git
 cd paperclip-ko
 pnpm install
 DO_NOT_TRACK=1 PAPERCLIP_TELEMETRY_DISABLED=1 \
-  pnpm paperclipai run --data-dir ~/.paperclip-ko
+  ./scripts/paperclip-ko run --data-dir ~/.paperclip-ko
 ```
 
 브라우저에서 엽니다.
@@ -57,7 +57,7 @@ upstream 영문판을 가장 빠르게 실행하려면 다음 명령을 쓸 수 
 npx paperclipai onboard --yes
 ```
 
-하지만 이 명령은 npm에 올라간 upstream `paperclipai` package를 실행합니다. 한국어 번역 포크의 UI와 문서를 보려면 `npx`가 아니라 clone한 레포 안에서 `pnpm paperclipai ...`를 실행해야 합니다.
+하지만 이 명령은 npm에 올라간 upstream `paperclipai` package를 실행합니다. 한국어 번역 포크의 UI와 문서를 보려면 `npx`가 아니라 clone한 레포 안에서 `./scripts/paperclip-ko ...`를 실행해야 합니다.
 
 이 포크는 npm package를 새로 배포하기보다, 번역과 i18n 방향을 검증한 뒤 upstream `paperclipai/paperclip`에 PR을 보내는 것을 목표로 합니다.
 

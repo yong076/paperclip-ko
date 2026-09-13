@@ -20,13 +20,13 @@ agent response에 **Helpful** 또는 **Needs work**를 누르면 Paperclip은 vo
 ## CLI report
 
 ```sh
-pnpm paperclipai feedback report
+./scripts/paperclip-ko feedback report
 ```
 
 다른 server/company:
 
 ```sh
-pnpm paperclipai feedback report --api-base http://127.0.0.1:3000 --company-id <company-id>
+./scripts/paperclip-ko feedback report --api-base http://127.0.0.1:3000 --company-id <company-id>
 ```
 
 ## API
@@ -51,7 +51,7 @@ curl http://127.0.0.1:3102/api/feedback-traces/<traceId>/bundle
 ## Export
 
 ```sh
-pnpm paperclipai feedback export
+./scripts/paperclip-ko feedback export
 ```
 
 timestamped directory와 zip을 생성합니다. `votes/`, `traces/`, `full-traces/`에 metadata와 full context bundle이 저장됩니다.

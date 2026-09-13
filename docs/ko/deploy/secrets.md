@@ -20,9 +20,9 @@ onboarding 중 자동 생성되며, key는 로컬 머신을 떠나지 않습니�
 ## CLI setup
 
 ```sh
-pnpm paperclipai onboard
-pnpm paperclipai configure --section secrets
-pnpm paperclipai doctor
+./scripts/paperclip-ko onboard
+./scripts/paperclip-ko configure --section secrets
+./scripts/paperclip-ko doctor
 ```
 
 ## Environment overrides

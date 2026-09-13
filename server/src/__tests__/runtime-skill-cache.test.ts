@@ -44,6 +44,7 @@ describe("runtime skill revision cache", () => {
     const sources = await Promise.all(Array.from({ length: 20 }, () => resolveRuntimeSkillCache(spec, read)));
     expect(new Set(sources).size).toBe(1);
     expect(read).toHaveBeenCalledTimes(2);
+    expect((await fs.stat(spec.entry)).mode & 0o222).toBe(0);
     expect((await fs.stat(sources[0]!)).mode & 0o222).toBe(0);
     expect((await fs.stat(path.join(sources[0]!, "SKILL.md"))).mode & 0o222).toBe(0);
     const before = await fs.stat(path.join(sources[0]!, "SKILL.md"));
@@ -126,9 +127,25 @@ describe("runtime skill revision cache", () => {
     expect(await resolveRuntimeSkillCache(spec, read, false)).toBeNull();
     expect(read).not.toHaveBeenCalled();
     expect(await resolveRuntimeSkillCache(spec, read)).toBe(source);
+    expect((await fs.stat(spec.entry)).mode & 0o222).toBe(0);
     expect(read).toHaveBeenCalledTimes(2);
     expect(await fs.readFile(path.join(source, "SKILL.md"), "utf8")).toBe(contents["SKILL.md"]);
     if (corruption === "symlink") expect(await fs.readFile(path.join(root, "outside.txt"), "utf8")).toBe("outside");
+  });
+
+  it("restores directory permissions when replacing an invalid revision fails", async () => {
+    const spec = runtimeSkillCacheSpec(root, skill)!;
+    await resolveRuntimeSkillCache(spec, reader());
+    await fs.chmod(spec.entry, 0o755);
+    await fs.unlink(path.join(spec.entry, "manifest.json"));
+    await fs.chmod(spec.entry, 0o555);
+    const rename = vi.spyOn(fs, "rename").mockRejectedValueOnce(new Error("Move failed"));
+    try {
+      await expect(resolveRuntimeSkillCache(spec, reader())).rejects.toThrow("Move failed");
+      expect((await fs.stat(spec.entry)).mode & 0o222).toBe(0);
+      expect((await fs.stat(path.join(spec.entry, "files"))).mode & 0o222).toBe(0);
+    } finally { rename.mockRestore(); }
+    expect(await resolveRuntimeSkillCache(spec, reader())).toBe(path.join(spec.entry, "files"));
   });
 
   it("does not publish partial builds and retries after a failed upstream read", async () => {

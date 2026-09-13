@@ -72,9 +72,17 @@ def sync(args):
 
 ## Linked Issues or Issue Description
 
+**What happened?**
+
 The fork's master does not contain the upstream master snapshot above.
-Expected behavior: retain Korean functionality while including upstream fixes.
-Reproduction: compare the fork and upstream master commit histories.
+
+**Expected behavior**
+
+Retain Korean functionality while including upstream fixes.
+
+**Steps to reproduce**
+
+Compare the fork and upstream master commit histories.
 
 ## What Changed
 

@@ -29,7 +29,7 @@ Docker나 외부 database는 필요 없습니다. embedded PostgreSQL을 자동 
 ## One-command bootstrap
 
 ```sh
-pnpm paperclipai run
+./scripts/paperclip-ko run
 ```
 
 config가 없으면 onboard하고, doctor를 repair enabled로 실행한 뒤 server를 시작합니다.
@@ -53,7 +53,7 @@ pnpm dev --bind tailnet
 추가 private hostname 허용:
 
 ```sh
-pnpm paperclipai allowed-hostname dotta-macbook-pro
+./scripts/paperclip-ko allowed-hostname dotta-macbook-pro
 ```
 
 ## Health checks

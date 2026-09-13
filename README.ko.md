@@ -95,7 +95,7 @@ Paperclip은 AI 에이전트 팀을 조직처럼 운영하는 Node.js 서버 + R
 
 이 레포는 `paperclipai/paperclip`의 한국어 번역 포크입니다. 현재 npm의 `paperclipai` 패키지는 upstream 영문판이므로, 한국어 UI와 문서를 보려면 이 레포를 clone해서 source install 방식으로 실행하세요.
 
-> `npx paperclipai ...`는 npm에 올라간 upstream 영문판을 실행합니다. 한국어판을 쓰려면 아래처럼 `pnpm paperclipai ...`를 이 레포 안에서 실행해야 합니다.
+> `npx paperclipai ...`는 npm에 올라간 upstream 영문판을 실행합니다. 한국어판을 쓰려면 아래처럼 `./scripts/paperclip-ko ...`를 이 레포 안에서 실행해야 합니다.
 
 ### 1. 포크하거나 clone하기
 
@@ -129,7 +129,7 @@ pnpm install
 
 ```sh
 DO_NOT_TRACK=1 PAPERCLIP_TELEMETRY_DISABLED=1 \
-  pnpm paperclipai run --data-dir ~/.paperclip-ko
+  ./scripts/paperclip-ko run --data-dir ~/.paperclip-ko
 ```
 
 브라우저에서 여세요.
