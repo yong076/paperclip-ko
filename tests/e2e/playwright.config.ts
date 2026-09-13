@@ -45,6 +45,14 @@ export default defineConfig({
   workers: 1,
   use: {
     baseURL: BASE_URL,
+    // Upstream regression tests use English selectors; production defaults to Korean.
+    storageState: {
+      cookies: [],
+      origins: [{
+        origin: BASE_URL,
+        localStorage: [{ name: "paperclip-language", value: "en" }],
+      }],
+    },
     headless: true,
     screenshot: "only-on-failure",
     trace: "on-first-retry",

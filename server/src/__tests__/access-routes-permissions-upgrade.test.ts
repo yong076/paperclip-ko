@@ -89,9 +89,12 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
+    // Load the route graph before timing permission behavior. A cold transform
+    // on macOS can exceed the first test's 10-second budget.
+    await import("../routes/access.js");
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-access-routes-permissions-upgrade-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 30_000);
 
   afterEach(async () => {
     await db.delete(activityLog);

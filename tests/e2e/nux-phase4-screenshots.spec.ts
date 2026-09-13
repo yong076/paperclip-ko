@@ -88,7 +88,10 @@ test.describe("NUX Phase 4 visual QA", () => {
     // ── Section B: Conference Room (BoardChat) ────────────────────────────
     // Visit the company dashboard first so CompanyContext selects the company
     // from the route before we land on the board-chat surface.
-    await page.evaluate(() => window.localStorage.clear());
+    await page.evaluate(() => {
+      window.localStorage.clear();
+      window.localStorage.setItem("paperclip-language", "en");
+    });
     await page.goto(`/${prefix}/dashboard`);
     await page.waitForLoadState("networkidle");
     await page.goto(`/${prefix}/board-chat`);
