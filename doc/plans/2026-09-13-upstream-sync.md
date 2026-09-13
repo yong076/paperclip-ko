@@ -48,6 +48,7 @@ The scheduled operator command is:
 
 ```sh
 python3 scripts/sync-upstream.py --publish \
+  --fork-url git@github.com-yong076:yong076/paperclip-ko.git \
   --status-file "$HOME/.local/state/paperclip-upstream-sync/status.json"
 ```
 
@@ -58,6 +59,9 @@ repository script require reinstalling that copy. Logs and the latest structured
 result are under `~/.local/state/paperclip-upstream-sync/`.
 
 The scheduler uses the operator's existing GitHub SSH and `gh` authentication.
+On Mac Studio, `github.com-yong076` selects the fork owner's SSH key. The default
+`github.com` key belongs to a different account and cannot push this fork. A
+successful `git ls-remote` on a public repository does not prove write access.
 It creates only `upstream-sync/<commit>` branches and draft PRs. It never force
 pushes, changes master, merges PRs, or restarts the app. Conflicts return a nonzero
 exit and list affected files in the status record; resolve them in a normal
